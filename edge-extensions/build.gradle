@@ -1,0 +1,15 @@
+dependencies {
+	implementation "org.apache.logging.log4j:log4j-core:${log4jVersion}"
+
+	implementation "io.micrometer:micrometer-registry-prometheus:${micrometerVersion}"
+	implementation "io.prometheus:simpleclient_httpserver:${prometheusVersion}"
+	implementation "io.prometheus:simpleclient_pushgateway:${prometheusVersion}"
+	implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+	implementation "org.xerial.snappy:snappy-java:${snappyVersion}"
+	implementation "com.fasterxml.jackson.core:jackson-core:${jacksonVersion}"
+	implementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+	
+	implementation(
+		project(":auxiliary:remote-write-protos")
+	)
+}

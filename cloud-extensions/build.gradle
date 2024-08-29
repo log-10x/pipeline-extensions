@@ -1,0 +1,39 @@
+dependencies {
+
+if ((project.hasProperty("fastutilmode")) &&
+		((project.getProperty("fastutilmode") == "debug") || (project.getProperty("fastutilmode") == "none"))) {
+		implementation "it.unimi.dsi:fastutil:${fastutilVersion}"
+	} else {
+		implementation files("../../l1x-inc/libs/fastutil-${fastutilVersion}-min.jar")
+	}
+
+	implementation "org.apache.logging.log4j:log4j-core:${log4jVersion}"
+	implementation "org.apache.logging.log4j:log4j-slf4j2-impl:${log4jVersion}"
+	implementation "org.apache.httpcomponents:httpclient:${apacheHttpClientVersion}"
+	implementation "commons-io:commons-io:${commonsIoVersion}"
+	implementation "io.micrometer:micrometer-registry-datadog:${micrometerVersion}"
+	implementation "io.micrometer:micrometer-registry-elastic:${micrometerVersion}"
+	implementation "io.micrometer:micrometer-registry-signalfx:${micrometerVersion}"
+	implementation "io.micrometer:micrometer-registry-cloudwatch2:${micrometerVersion}"
+	implementation "io.micrometer:micrometer-registry-influx:${micrometerVersion}"
+	implementation "io.micrometer:micrometer-registry-prometheus:${micrometerVersion}"
+	implementation "io.prometheus:simpleclient_httpserver:${prometheusVersion}"
+	implementation "org.apache.camel:camel-core:${camelVersion}"
+	implementation "org.apache.camel:camel-stream:${camelVersion}"
+	implementation "org.apache.camel:camel-netty-http:${camelVersion}"
+	implementation "org.apache.camel:camel-netty:${camelVersion}"
+	implementation "org.apache.camel:camel-jackson:${camelVersion}"
+	implementation "org.apache.camel:camel-yaml-dsl:${camelVersion}"
+	implementation "org.apache.camel:camel-jsonpath:${camelVersion}"
+	implementation "com.baqend:bloom-filter:${bloomFilterVersion}"
+	implementation "software.amazon.awssdk:lambda:${awsSdkVersion}"
+	implementation "software.amazon.awssdk:s3:${awsSdkVersion}"
+	implementation "software.amazon.awssdk:aws-crt-client:${awsSdkVersion}"
+	implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-xml:${jacksonVersion}"
+	implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${jacksonVersion}"
+	implementation "org.unbescape:unbescape:${unbescapeVersion}"
+
+	implementation(
+		project(":pipeline-extensions:edge-extensions")
+	)
+}
