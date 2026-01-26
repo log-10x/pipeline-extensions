@@ -1,0 +1,40 @@
+buildscript {
+	repositories {
+		mavenCentral()
+		maven {
+			url "https://plugins.gradle.org/m2/"
+		}
+	}
+}
+
+def configureProject(project) {
+	project.apply(plugin: "eclipse")
+}
+
+subprojects {
+	apply plugin: "java"
+	
+	java {
+		sourceCompatibility = JavaVersion.VERSION_21
+		targetCompatibility = JavaVersion.VERSION_21
+	}
+
+	repositories {
+		mavenCentral()
+	}
+
+	compileJava {
+		options.encoding = 'UTF-8'
+		options.compilerArgs << '-parameters'
+	}
+
+	compileTestJava {
+		options.encoding = 'UTF-8'
+	}
+	
+	afterEvaluate {
+		if (new File(projectDir, "build.gradle").canRead()) {
+			configureProject(it)
+		}
+	}
+}

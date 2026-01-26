@@ -1,0 +1,60 @@
+syntax = "proto3";
+package com.log10x.eng.symbol.indexer.fileSystem.store;
+
+option java_outer_classname = "FsSymbolUnitsIndexProto";
+
+// The compile merge phase generates files described by this schema to
+// enable the run pipeline to quickly pinpoint the symbol units in which
+// a target symbol values appears at run time.
+
+// To learn more see:
+// https://doc.log10x.com/compile/link/#outputsymbolfile
+// https://doc.log10x.com/run/transform/#reflection   
+
+// entry messages map a symbol hash value to the index in the 'IndexValues'
+// list where its associated index values reside.
+// To learn more see https://doc.log10x.com/run/transform/structure/#symbols
+message MapEntry {
+    int64 key = 1;
+    int32 value = 2;
+}
+
+// this message maps a symbol hash to a segment within 'IndexValues'
+// which contains all the indices of the symbol units in which it is contained
+// within the target symbol file (i.e., a reverse hash -> containing symbol units map). 
+message KeyToHeadMap {
+    int32 size = 1;          	  	// Number of entries in map
+    repeated MapEntry entries = 2;	// symbol hash, index in 'IndexValues'
+}
+
+// this list contains the indexes in the target .tenx.json symbol file
+// of the symbol units which contain a target symbol hash. Each segment within the list contains
+// a size value (e.g., 5 values) followed by the actual values (e.g., idx1,idex2...5)
+message IndexValues {
+    int32 size = 1;           					 // Number of values in list
+    repeated int32 values = 2 [packed = true];	 // Buffer of: <size>[elements..],<size>[elements..],..
+}
+
+// this list contains the line positions within the target .tenx.json symbol file,
+// where each start/len pair in this list marks a whole symbol unit JSON object
+message SymbolPosList {
+    int32 size = 1;           				 // Number of list elements
+    repeated int32 list = 2 [packed = true]; // start byte offset in file and len
+}
+
+// this list contains the symbol hash values of symbols which were scanned
+// but were not merged due to their context not matching the compile 'symbolTypes' value.
+// To learn more see https://doc.log10x.com/compile/link/#symboltypes
+message KeySet {
+    int32 size = 1;            				 // Number of keys
+    repeated int64 keys = 2 [packed = true]; // additional symbol hash values not in KeyToHeadMap 
+}
+
+// top level message for this file
+message DataStore {
+    KeyToHeadMap key_to_head_map = 1;    // symbol hash to index in values
+    IndexValues index_values = 2;        // buffer of: size + indices of symbol unit in symbol_pos_list
+    SymbolPosList symbol_pos_list = 3;	 // symbol unit offset pairs (start, len) in indexed symbol file
+    KeySet key_set = 4;  				 // symbol hashes
+    int64 checksum = 5;					 // xx hash of indexed symbol file
+}

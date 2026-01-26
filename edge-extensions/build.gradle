@@ -1,0 +1,34 @@
+dependencies {
+    // Log4j annotation processor for plugin discovery (generates Log4j2Plugins.dat)
+    // REQUIRED for GraalVM native image builds - without this, custom log4j plugins
+    // like 'tenxFields' and 'tag' won't be discovered at runtime, causing errors:
+    // "Unable to locate plugin type for tenxFields"
+    annotationProcessor "org.apache.logging.log4j:log4j-core:${log4jVersion}"
+
+    implementation "org.apache.logging.log4j:log4j-core:${log4jVersion}"
+    implementation "io.micrometer:micrometer-registry-prometheus:${micrometerVersion}"
+    implementation "io.prometheus:prometheus-metrics-exporter-httpserver:${prometheusMetricsVersion}"
+    implementation "io.prometheus:prometheus-metrics-exporter-pushgateway:${prometheusMetricsVersion}"
+    implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+    implementation "org.xerial.snappy:snappy-java:${snappyVersion}"
+    implementation "com.fasterxml.jackson.core:jackson-core:${jacksonVersion}"
+    implementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+    implementation "io.grpc:grpc-protobuf:1.76.0"
+    implementation "io.grpc:grpc-stub:1.76.0"
+    implementation "io.opentelemetry.proto:opentelemetry-proto:1.8.0-alpha"
+    implementation "io.grpc:grpc-netty:1.76.0"
+    implementation "io.netty:netty-transport-classes-epoll:4.1.124.Final"
+    implementation "io.netty:netty-transport-classes-kqueue:4.1.124.Final"
+    implementation "io.netty:netty-transport-native-unix-common:4.1.124.Final"
+    implementation "io.netty:netty-transport-native-epoll:4.1.124.Final:linux-x86_64"
+    implementation "io.netty:netty-transport-native-kqueue:4.1.124.Final:osx-x86_64"
+    implementation "com.log10x:prometheus-remote-write:${remoteWriteVersion}"
+    
+    implementation(
+        project(":pipeline-extensions:api-extensions")
+    )
+}
+
+tasks.withType(JavaExec) {
+    jvmArgs "-Dio.netty.native.workdir=/tmp/netty-native", "-Dio.netty.native.deleteLibAfterLoading=false"
+}
