@@ -195,7 +195,7 @@ This document lists the third-party open-source dependencies used by Log10x pipe
 | Java | 21 |
 | Gradle | 9.x |
 | GraalVM (native builds) | CE for JDK 21 |
-| Docker base image | ghcr.io/log-10x/pipeline-10x |
+| Docker base image | log10x/pipeline-10x |
 
 ---
 
