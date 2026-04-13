@@ -13,6 +13,7 @@ dependencies {
     implementation "org.xerial.snappy:snappy-java:${snappyVersion}"
     implementation "com.fasterxml.jackson.core:jackson-core:${jacksonVersion}"
     implementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+    implementation "org.msgpack:msgpack-core:${msgpackVersion}"
     implementation "io.grpc:grpc-protobuf:1.76.0"
     implementation "io.grpc:grpc-stub:1.76.0"
     implementation "io.opentelemetry.proto:opentelemetry-proto:1.8.0-alpha"
