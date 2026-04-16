@@ -11,7 +11,7 @@ import org.apache.logging.log4j.message.Message;
 
 /*
  * A log4j2 plugin to provide programmatic access to target
- * l1xObject fields via a {@link java.util.function.Function} reference.
+ * tenxObject fields via a {@link java.util.function.Function} reference.
  */
 @Plugin(name = FieldValuesAccessor.ELEMENT_TYPE, 
 		category = Core.CATEGORY_NAME, 
@@ -21,22 +21,22 @@ import org.apache.logging.log4j.message.Message;
 public abstract class FieldValuesAccessor implements 
 	Function<Message, Map<String, Object>> {
 
-	public static final String ELEMENT_TYPE = "l1xFields";
+	public static final String ELEMENT_TYPE = "tenxFields";
 	
 	public static final String FIELD_NAMES = "fieldNames";
 	
 	/**
 	 * A factory method to create a function instance that can be applied to
-	 * an l1x Object implementing the logj2 Message interface to obtain a set
+	 * an tenxObject implementing the logj2 Message interface to obtain a set
 	 * of target field values.  
 	 * 
 	 * @param 	fieldNames
-	 * 			a list of l1x intrinsic / calculated / extracted object values.
+	 * 			a list of 10x intrinsic / calculated / extracted object values.
 	 * 			Field names are comma separated (e.g., ("text,vars,price")
 	 * 
 	 * 
 	 * @return	a {@link java.util.function.Function} reference into which to pass 
-	 * 			an l1xObject implementing the {@link org.apache.logging.log4j.message.Message}
+	 * 			an tenxObject implementing the {@link org.apache.logging.log4j.message.Message}
 	 * 			interface via its apply method to receive a map of the desired field
 	 * 			values pairs specified by {@code fieldNames}
 	 * 
@@ -49,7 +49,7 @@ public abstract class FieldValuesAccessor implements
     }	
 	
 	/**
-	 * This member is set by the l1x runtime.
+	 * This member is set by the 10x engine.
 	 */
 	public static Factory factory; 
 	

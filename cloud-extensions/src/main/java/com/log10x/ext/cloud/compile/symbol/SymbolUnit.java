@@ -10,7 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 /*
  * This class demonstrates the expected JSON schema of a symbol unit 
- * emitted to the console by a program launched by an l1x 'compile' pipeline 'exec' scanner.
+ * emitted to the console by a program launched by a 10x 'compile' pipeline 'exec' scanner.
  * This method allows developers to extract symbolic information from an arbitrary
  * target source code/binary file or an external source (e.g. DB, web service).
  */
@@ -24,8 +24,9 @@ public class SymbolUnit {
 	
 	/**
 	 * The different contexts under which a a symbol can appear in
-	 * a source/binary input file. To learn more, see:
-	 * https://github.com/l1x-co/config/blob/main/pipelines/run/units/transform/symbol/options.yaml
+	 * a source/binary input file.
+	 * 
+	 * @see <a href="https://doc.log10x.com/run/transform/symbol/#contexts">Symbol contexts</a>
 	 */
 	public enum SymbolSourceContext {
 		
@@ -74,6 +75,20 @@ public class SymbolUnit {
 			this.context = context;  
 			this.children = new ArrayList<>();
 		}
+		
+		public SymbolUnitNode append(String value, SymbolSourceContext ctxt) {
+			children.add(new SymbolUnitNode(value, ctxt));
+			return this;
+		}
+		
+		public SymbolUnitNode append(Map<String, SymbolSourceContext> values) {
+			
+			for (Entry<String, SymbolSourceContext> entry : values.entrySet()) {
+				children.add(new SymbolUnitNode(entry.getKey(), entry.getValue()));
+			}
+			
+			return this;
+		}	
 	}
 	
 	public final Collection<SymbolUnitNode> nodes = new ArrayList<>();
@@ -85,18 +100,12 @@ public class SymbolUnit {
 		return this;
 	}
 	
-	public SymbolUnit append(String value, SymbolSourceContext ctxt) {
-		nodes.add(new SymbolUnitNode(value, ctxt));
-		return this;
-	}
-	
-	public SymbolUnit append(Map<String, SymbolSourceContext> values) {
+	public SymbolUnitNode append(String value, SymbolSourceContext ctxt) {
 		
-		for (Entry<String, SymbolSourceContext> entry : values.entrySet()) {
-			nodes.add(new SymbolUnitNode(entry.getKey(), entry.getValue()));
-		}
+		SymbolUnitNode result = new SymbolUnitNode(value, ctxt);
 		
-		return this;
+		nodes.add(result);
+		return result;
 	}
 	
 	/*
@@ -113,13 +122,13 @@ public class SymbolUnit {
 	}
 		
 	/**
-	 * A simple example program to emit a structured l1x symbol tree via its stdout.
+	 * A simple example program to emit a structured 10x symbol tree via its stdout.
 	 * This can be implemented in any language.
 	 * Each line written to stdout will be parsed as a symbol unit JSON object.
 	 * 
-	 * @param args	When launched by an l1x 'compile pipeline 
+	 * @param args	When launched by a 10x 'compile pipeline 
 	 * 				this value contains the value set by the 'execArgs' startup argument 
-	 * 				defined in XXX TODO
+	 * 				defined in: https://doc.log10x.com/compile/scanner/executable/#execargs
 	 * 				The contents of this file can contain either the content to scan for symbols or
 	 * 				configuration values used by this program (e.g., URLs, authentication tokens)
 	 * 				used to fetch the content to scan.

@@ -4,7 +4,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import com.log10x.ext.cloud.index.interfaces.QueryObjectRequest;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.log10x.api.util.MapperUtil;
+import com.log10x.ext.cloud.index.interfaces.options.QueryObjectRequest;
 import com.log10x.ext.cloud.index.util.ArgsUtil;
 
 /**
@@ -12,54 +14,88 @@ import com.log10x.ext.cloud.index.util.ArgsUtil;
  * from an input blob residing within a cloud storage, and extract events
  * falling within a time range and matching search terms.
  * To learn more more, see:
- * {@link http://doc.log10x.com/run/input/objectStorage/query/object }
+ * {@link https://doc.log10x.com/run/input/objectStorage/query/object }
  */
 public class QueryObjectOptions implements QueryObjectRequest {
+	
+	public final String queryName;
 	
 	public final String objectStorageName;
 	
 	public final List<String> objectStorageArgs;
 
-	public final List<String> terms;
+	public final String filter;
 
 	public final String target;
 	
+	public final String targetObject;
+	
 	public final String container;
+	
+	public final String indexContainer;
 
 	public final long from;
 
 	public final long to;
 	
 	public final long[] byteRanges;	
-		
-	private transient int currByteRangeIndex;
 	
-	public QueryObjectOptions(
-		String objectStorageName, List<String> objectStorageArgs,
-		List<String> terms, 
-		String target, String container,
-		long from, long to, long[] byteRanges) {
-		
+	public final String ID;
+
+	public final long elapseTime;
+
+	public final List<String> logLevels;
+
+	public final String logGroup;
+
+	public final boolean writeResults;
+
+	private transient int currByteRangeIndex;
+
+	public QueryObjectOptions(String queryName, String objectStorageName, List<String> objectStorageArgs,
+			String filter, String target, String targetObject, String container, String indexContainer,
+			long from, long to, long[] byteRanges, String ID, long elapseTime,
+			List<String> logLevels, String logGroup, boolean writeResults) {
+
+		this.queryName = queryName;
 		this.objectStorageName = objectStorageName;
 		this.objectStorageArgs = objectStorageArgs;
-		
-		this.terms = terms;
+		this.filter = filter;
+
 		this.target = target;
+		this.targetObject = targetObject;
 		this.container = container;
+		this.indexContainer = indexContainer;
+
 		this.from = from;
 		this.to = to;
 		this.byteRanges = byteRanges;
+
+		this.ID = ID;
+		this.elapseTime = elapseTime;
+		this.logLevels = logLevels;
+		this.logGroup = logGroup;
+
+		this.writeResults = writeResults;
 	}
-	
+
 	public QueryObjectOptions(QueryObjectRequest other, int segmentSize) {
-		
-		this(other.accessorAlias(), ArgsUtil.toList(other.args()),
-			other.terms(), other.inputObject(), other.inputContainer(),
-			other.from(), other.to(), new long [segmentSize * 2]);
+
+		this(other.name(), other.accessorAlias(), ArgsUtil.toList(other.args()),
+			other.filter(), other.target(), other.inputObject(),
+			other.inputContainer(), other.indexContainer(),
+			other.from(), other.to(), new long [segmentSize * 2],
+			other.ID(), other.elapseTime(), other.queryLogLevels(), other.queryLogGroup(),
+			false);
 	}
 
 	public QueryObjectOptions() {
-		this(null, new ArrayList<>(), new ArrayList<>(), null, null, 0, 0, null);
+		this(null, null, new ArrayList<>(), null, null, null, null, null, 0, 0, null, null, 0, null, null, false);
+	}
+	
+	@Override
+	public String name() {
+		return this.queryName;
 	}
 	
 	@Override
@@ -92,8 +128,13 @@ public class QueryObjectOptions implements QueryObjectRequest {
 	}
 
 	@Override
-	public String inputObject() {
+	public String target() {
 		return this.target;
+	}
+	
+	@Override
+	public String inputObject() {
+		return this.targetObject;
 	}
 
 	@Override
@@ -102,8 +143,8 @@ public class QueryObjectOptions implements QueryObjectRequest {
 	}
 
 	@Override
-	public List<String> terms() {
-		return this.terms;
+	public String filter() {
+		return this.filter;
 	}
 
 	@Override
@@ -137,12 +178,42 @@ public class QueryObjectOptions implements QueryObjectRequest {
 
 	@Override
 	public String indexContainer() {
-		return null;
+		return this.indexContainer;
 	}
 	
 	@Override
+	public String ID() {
+		return this.ID;
+	}
+	
+	@Override
+	public long elapseTime() {
+		return this.elapseTime;
+	}
+	
+	@Override
+	public List<String> queryLogLevels() {
+		return this.logLevels;
+	}
+	
+	@Override
+	public String queryLogGroup() {
+		return this.logGroup;
+	}
+
+	@Override
 	public Map<String, String> args() {
-		
+
 		return ArgsUtil.toMap(objectStorageArgs);
+	}
+
+	@Override
+	public String toString() {
+	
+		try {
+			return MapperUtil.jsonMapper.writeValueAsString(this);
+		} catch (JsonProcessingException e) {
+			return e.toString();
+		}
 	}
 }

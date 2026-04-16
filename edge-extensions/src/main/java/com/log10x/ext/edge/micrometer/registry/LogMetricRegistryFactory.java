@@ -8,10 +8,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.spi.LoggerContext;
 
-import com.log10x.ext.edge.micrometer.MapRegistryConfig;
-import com.log10x.ext.edge.micrometer.MetricRegistryFactory;
-import com.log10x.ext.edge.micrometer.registry.PeriodicEmittingMetricRegistry.EmittingMetricRegistry;
-import com.log10x.ext.edge.micrometer.registry.PeriodicEmittingMetricRegistry.PeriodicEmittingConfig;
+import com.log10x.api.util.micrometer.MapRegistryConfig;
+import com.log10x.api.util.micrometer.MetricRegistryFactory;
+import com.log10x.api.util.micrometer.PeriodicEmittingMetricRegistry;
+import com.log10x.api.util.micrometer.PeriodicEmittingMetricRegistry.EmittingMetricRegistry;
+import com.log10x.api.util.micrometer.PeriodicEmittingMetricRegistry.PeriodicEmittingConfig;
 
 import io.micrometer.core.instrument.Clock;
 import io.micrometer.core.instrument.MeterRegistry;

@@ -53,22 +53,25 @@ public final class Utf8Array {
    */
   public static int encodedLength(char[] sequence, int start, int len) {
     // Warning to maintainers: this implementation is highly optimized.
+	int from = start;
+	int to = start + len;
+	
     int utf16Length = len;
     int utf8Length = utf16Length;
-    int i = start;
+    int i = from;
 
     // This loop optimizes for pure ASCII.
-    while (i < utf16Length && sequence[i] < 0x80) {
+    while (i < to && sequence[i] < 0x80) {
       i++;
     }
-
+    
     // This loop optimizes for chars less than 0x800.
-    for (; i < utf16Length; i++) {
+    for (; i < to; i++) {
       char c = sequence[i];
       if (c < 0x800) {
         utf8Length += ((0x7f - c) >>> 31); // branch free!
       } else {
-        utf8Length += encodedLengthGeneral(sequence, i, len);
+        utf8Length += encodedLengthGeneral(sequence, i, to);
         break;
       }
     }
@@ -92,10 +95,9 @@ public final class Utf8Array {
 	      2;
   }
   
-  private static int encodedLengthGeneral(char[] sequence, int start, int length) {
-    int utf16Length = length;
+  private static int encodedLengthGeneral(char[] sequence, int start, int to) {
     int utf8Length = 0;
-    for (int i = start; i < utf16Length; i++) {
+    for (int i = start; i < to; i++) {
       char c = sequence[i];
       if (c < 0x800) {
         utf8Length += (0x7f - c) >>> 31; // branch free!

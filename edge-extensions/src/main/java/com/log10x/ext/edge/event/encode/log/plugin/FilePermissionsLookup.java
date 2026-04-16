@@ -9,7 +9,7 @@ import org.apache.logging.log4j.core.lookup.StrLookup;
  * alphanumeric equivalent. To learn more, see:
  * {@link https://en.wikipedia.org/wiki/File-system_permissions#Numeric_notation}
  * 
- * Used by: {@link https://github.com/l1x-co/config/blob/main/pipelines/run/modules/input/forwarder/filebeat/input/log4j2.yaml}
+ * Used by: {@link https://github.com/log-10x/config/blob/main/pipelines/run/modules/input/forwarder/filebeat/input/log4j2.yaml}
  */
 @Plugin(name = FilePermissionsLookup.PLUGIN_NAME, category = StrLookup.CATEGORY)
 public class FilePermissionsLookup implements StrLookup {

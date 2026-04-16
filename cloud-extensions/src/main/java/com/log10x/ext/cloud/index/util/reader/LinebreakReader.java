@@ -69,6 +69,12 @@ public class LinebreakReader extends FilterReader implements InputStreamLinebrea
 		
 		synchronized (this.bufList) {
 			
+			int size = bufList.size();
+			
+			if (size == 0) {
+				return 0;
+			}
+			
 			int bufIndex   = (int)(index / LINEBREAK_BUF_SIZE);
 			int indexInBuf = (int)(index % LINEBREAK_BUF_SIZE);
 			

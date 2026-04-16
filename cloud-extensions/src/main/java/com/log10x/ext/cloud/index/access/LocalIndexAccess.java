@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -21,16 +22,17 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
-import com.log10x.ext.cloud.index.interfaces.IndexContainerOptions;
-import com.log10x.ext.cloud.index.interfaces.IndexObject;
-import com.log10x.ext.cloud.index.interfaces.ObjectStorageAccessOptions;
+import com.log10x.api.eval.EvaluatorBean;
+import com.log10x.api.util.MapperUtil;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
-import com.log10x.ext.cloud.index.interfaces.ObjectStorageInputContainerOptions;
+import com.log10x.ext.cloud.index.interfaces.options.IndexContainerOptions;
+import com.log10x.ext.cloud.index.interfaces.options.ObjectStorageAccessOptions;
+import com.log10x.ext.cloud.index.interfaces.options.ObjectStorageInputContainerOptions;
 import com.log10x.ext.cloud.index.util.stream.ByteRangeFileInputStream;
-import com.log10x.ext.edge.json.MapperUtil;
 
 /**
  * Implementation of the {@link ObjectStorageIndexAccessor} interface over
@@ -39,27 +41,70 @@ import com.log10x.ext.edge.json.MapperUtil;
  * 
  */
 public class LocalIndexAccess implements ObjectStorageIndexAccessor {
+
+	/**
+	 * Defines an object stored during the indexing of an input object within an
+	 * underlying KV storage (e.g. AWS S3). Index objects include JSON serialized
+	 * tenxTemplate values and encoded bloom filters.
+	 * 
+	 * To learn more see https://doc.log10x.com/run/input/objectStorage/index/#storage-filters 
+	 */
+	protected static class IndexObject {
+
+		/**
+		 * the key value of this index object
+		 */
+		public final String name;
+
+		/**
+		 * optional metadata tags
+		 */
+		public final Map<String, String> tags;
+
+		protected IndexObject(String name, Map<String, String> tags) {
+			this.name = name;
+			this.tags = tags;
+		}
+		
+		protected IndexObject() {
+			this(null, Collections.emptyMap());
+		}
+
+		@Override
+		public int hashCode() {
+			return name.hashCode();
+		}
+
+		@Override
+		public boolean equals(Object obj) {
+
+			if (!(obj instanceof IndexObject)) {
+				return false;
+			}
+
+			if (this == obj) {
+				return true;
+			}
+
+			IndexObject other = (IndexObject) obj;
+
+			return ((Objects.equals(this.name, other.name)) &&
+					(tags.equals(other.tags)));
+		}
+
+		@Override
+		public String toString() {
+			return String.format("%s tags: %s", name, tags);
+		}
+	}
 	
 	protected final ObjectStorageAccessOptions options;
 	
 	private final Object objectLock;
 	
+	private final boolean debugMode;
+	
 	private final static MessageDigest md;
-
-	protected static class FileAccessorIndexObject extends IndexObject {
-		
-		protected final String value;
-		
-		public FileAccessorIndexObject() {
-			this(null, Collections.emptyMap(), null);
-		}
-		
-		public FileAccessorIndexObject(String name, Map<String, String> tags, String value) {
-			
-			super(name, tags);
-			this.value = value;
-		}
-	}
 						
 	private volatile File indexFolder;
 	
@@ -67,13 +112,23 @@ public class LocalIndexAccess implements ObjectStorageIndexAccessor {
 	
 	private ConcurrentHashMap<String, String> indexKeysCache;
 	
-	public LocalIndexAccess(ObjectStorageAccessOptions options) {
+	public LocalIndexAccess(ObjectStorageAccessOptions options, EvaluatorBean evaluatorBean) {
 		
 		this.options = options;		
 		this.objectLock = new Object();
+		
+		Object raw = evaluatorBean.env("TENX_DEBUG_INDEX_ACCESS", Boolean.FALSE);
+
+		if (raw instanceof Boolean bool) {
+			this.debugMode = bool.booleanValue();
+		} else if (raw instanceof String s) {
+			this.debugMode = Boolean.valueOf(s);
+		} else {
+			this.debugMode = false;
+		}
 	}
 	
-	private void initializeIndex() {
+	private void initializeIndexFolder() {
 		
 		if (this.indexFolder != null) {
 			return;
@@ -85,16 +140,22 @@ public class LocalIndexAccess implements ObjectStorageIndexAccessor {
 				return;
 			}
 			
-			File indexContainer = new File(((IndexContainerOptions)options).indexContainer()); 
+			if (options.indexContainer() == null) {
+				throw new IllegalStateException();
+			}
 			
-			if (!indexContainer.isDirectory()) {
-				throw new IllegalArgumentException("'indexContainer' must be a folder for: " + options);
+			String indexContainer = options.indexContainer();
+			
+			File indexContainerFile = new File(indexContainer); 
+			
+			if (!indexContainerFile.isDirectory()) {
+				throw new IllegalArgumentException("'indexContainer' must be a folder, received: " + indexContainer);
 			}
 			
 			this.indexCache = new ConcurrentHashMap<>();
 			this.indexKeysCache = new ConcurrentHashMap<>();
 			
-			this.indexFolder = indexContainer;
+			this.indexFolder = indexContainerFile;
 		}
 	}
 	
@@ -103,57 +164,56 @@ public class LocalIndexAccess implements ObjectStorageIndexAccessor {
 	}
 		
 	@Override
-	public String putObject(String prefix, String key, String value,
-		Map<String, String> tags) throws IOException {
+	public String putObject(String prefix, String key, InputStream content,
+		long contentLength, Map<String, String> tags) throws IOException {
 				
 		if ((key == null) || 
 			(key.isBlank())) {
 			
-			throw new IllegalArgumentException(prefix + ": " + value + ": " + tags);
+			throw new IllegalArgumentException(prefix + ": " + contentLength + ": " + tags);
 		}
 		
-		this.initializeIndex();
+		this.initializeIndexFolder();
 		
-		String path = String.join(this.keyPathSeperator(), prefix, key);
-		File indexObjectFile = new File(this.indexFolder, path);
+		String result;
 		
-		indexObjectFile.getParentFile().mkdirs();
+		if (content != null) {
+			
+			result = String.join(this.keyPathSeperator(), prefix, key);
+			
+			if (!this.debugMode) {
+				
+				File file = new File(this.indexFolder, result);
+				
+				file.getParentFile().mkdirs();
+						
+				Files.copy(content, file.toPath(), 
+					StandardCopyOption.REPLACE_EXISTING);
+			}
+			
+		} else {
+			
+			String hash = hash(key);
+			
+			result = String.join(this.keyPathSeperator(), prefix, hash);
+
+			if (!this.debugMode) {
+				
+				File file = new File(this.indexFolder, result);
+				
+				file.getParentFile().mkdirs();
+							
+				try (FileWriter writer = new FileWriter(file, StandardCharsets.UTF_8)) {
 					
-		try (FileWriter writer = new FileWriter(indexObjectFile, StandardCharsets.UTF_8)) {
-			writer.write(value);
+					MapperUtil.jsonMapper.writeValue(writer, 
+						new IndexObject(key, tags));
+				}
+			}
 		}
-		
-		return path;
+
+		return result;
 	}
 	
-	@Override
-	public String putIndexObject(String prefix, String key, String value,
-		Map<String, String> tags) throws IOException {
-				
-		if ((key == null) || 
-			(key.isBlank())) {
-			
-			throw new IllegalArgumentException(prefix + ": " + value + ": " + tags);
-		}
-		
-		this.initializeIndex();
-		
-		String hash = hash(key);
-		
-		String path = String.join(this.keyPathSeperator(), prefix, hash);
-		File indexObjectFile = new File(this.indexFolder, path);
-		
-		indexObjectFile.getParentFile().mkdirs();
-					
-		try (FileWriter writer = new FileWriter(indexObjectFile, StandardCharsets.UTF_8)) {
-			
-			MapperUtil.jsonMapper.writeValue(writer, 
-				new FileAccessorIndexObject(key, tags, value));
-		}
-		
-		return path;
-	}
-
 	@Override
 	public InputStream readObject(String key, 
 		long off, int len) throws IOException {
@@ -170,29 +230,13 @@ public class LocalIndexAccess implements ObjectStorageIndexAccessor {
 	@Override
 	public InputStream readObject(String key) throws IOException {
 		
-		this.initializeIndex();
+		this.initializeIndexFolder();
 
 		File indexObjectFile = new File(this.indexFolder, key);
 				
 		try (FileInputStream fis = new FileInputStream(indexObjectFile)) {
 			
 			return new ByteArrayInputStream(fis.readAllBytes());
-		}
-	}
-	
-	@Override
-	public InputStream readIndexObject(String key) throws IOException {
-		
-		this.initializeIndex();
-
-		File indexObjectFile = new File(this.indexFolder, key);
-				
-		try (FileReader reader = new FileReader(indexObjectFile)) {
-			
-			FileAccessorIndexObject object = MapperUtil.jsonMapper.readValue(reader, 
-				FileAccessorIndexObject.class);
-			
-			return new ByteArrayInputStream(object.value.getBytes());
 		}
 	}
 	
@@ -252,10 +296,9 @@ public class LocalIndexAccess implements ObjectStorageIndexAccessor {
 	}
 
 	@Override
-	public Iterator<List<String>> iterateObjectKeys(String prefix, 
-		String searchAfter) throws IOException {
+	public Iterator<List<String>> iterateObjectKeys(String prefix, String searchAfter, boolean failOnMissing) throws IOException {
 		
-		this.initializeIndex();
+		this.initializeIndexFolder();
 		
 		List<String> files = this.prefixFiles(prefix);
 		
@@ -309,14 +352,14 @@ public class LocalIndexAccess implements ObjectStorageIndexAccessor {
 	
 	private IndexObject indexObject(String key) throws IOException {
 		
-		this.initializeIndex();
+		this.initializeIndexFolder();
 		
 		File indexObjectFile = new File(this.indexFolder, key);
 		
 		try (FileReader reader = new FileReader(indexObjectFile, StandardCharsets.UTF_8)) {
 			
 			return MapperUtil.jsonMapper.readValue(reader, 
-				FileAccessorIndexObject.class);			
+				IndexObject.class);			
 		}
 	}
 	
@@ -342,5 +385,22 @@ public class LocalIndexAccess implements ObjectStorageIndexAccessor {
 	@Override
 	public void close() throws IOException {
 		
+	}
+
+	@Override
+	public int deleteObjects(List<String> keys) {
+		
+		int result = 0;
+		
+		for (String key : keys) {
+			
+			File file = new File(this.indexFolder, key);
+			
+			if (file.delete()) {
+				result++;
+			}	
+		}
+		
+		return result;
 	}
 }

@@ -13,6 +13,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.log10x.api.eval.EvaluatorBean;
+
 /**
  * A utility output stream used by {@link ProcOutputStream} to launch
  * and write data in a spawned sub-process' stdin pipe.
@@ -36,13 +38,26 @@ public class ProcOutputStreamImpl extends OutputStream {
 		public void run() {
 			
 			Thread.currentThread().setName(
-				(this.stderr ? "stderr: " : "stdout : ") + options.command());
+				(this.stderr ? "stderr: " : "stdout : ") + options.fullCommand());
 				
 			try {
 				
 				String line;
 
 				while ((!completed) && ((line = reader.readLine()) != null)) {
+					
+					if ((!startupPatternFound) &&
+						(hasStartupPattern())) {
+						
+						if (options.startupWaitPattern().matcher(line).find()) {
+							
+							synchronized (startupLock) {
+								
+								startupPatternFound = true;
+								startupLock.notify();
+							}
+						}
+					}
 					
 					if (this.stderr) {
 						
@@ -72,7 +87,7 @@ public class ProcOutputStreamImpl extends OutputStream {
 		
 	}
 		
-	public final ProcOutputStreamOptions options;
+	public final ProcStreamOptions options;
 	
 	private final long destroyWaitTime;
 		
@@ -86,12 +101,16 @@ public class ProcOutputStreamImpl extends OutputStream {
 		
 	private boolean closed;
 	
+	private final Object startupLock;
+	
+	private volatile boolean startupPatternFound;
+	
 	private volatile boolean completed;
 
-	public ProcOutputStreamImpl(ProcOutputStreamOptions options, long destroyWaitTime) {
+	public ProcOutputStreamImpl(ProcStreamOptions options, long destroyWaitTime) {
 				
-		if ((options.procOutCommand == null) ||
-			(options.procOutCommand.isBlank())) {
+		if ((options.command() == null) ||
+			(options.command().isBlank())) {
 			
 			throw new IllegalArgumentException("no command");
 		}
@@ -101,13 +120,30 @@ public class ProcOutputStreamImpl extends OutputStream {
 		
 		this.currReadLines = new AtomicLong();
 		
-		if ((!options.procOutLazyLaunch) &&
+		if (hasStartupPattern()) {
+			this.startupLock = new Object();
+		} else {
+			this.startupLock = null;
+		}
+		
+		if ((!options.lazyLaunch()) &&
 			(!this.startIfNeeded())) {
 			
 			throw new IllegalStateException("could not launch: " + options.command());
 		}
 	}
 
+	private boolean hasStartupPattern() {
+		
+		return (this.options.startupWaitPattern() != null);
+	}
+	
+	private boolean hasStartupWait() {
+		
+		return ((this.options.startupWaitMs() > 0) ||
+				(this.options.startupWaitPattern() != null));
+	}
+	
 	public boolean isAlive() {
 		
 		return
@@ -131,10 +167,10 @@ public class ProcOutputStreamImpl extends OutputStream {
 				return true;
 			}
 	
-			List<String> command = new ArrayList<>(options.procOutArgs.size() + 1);
+			List<String> command = new ArrayList<>(options.args().size() + 1);
 			
-			command.add(options.procOutCommand);
-			command.addAll(options.procOutArgs);
+			command.add(options.command());
+			command.addAll(options.args());
 			
 			if (logger.isDebugEnabled()) {
 				logger.debug("launching: " + command);
@@ -151,7 +187,40 @@ public class ProcOutputStreamImpl extends OutputStream {
 
 				executorService.submit(new ProcOutputLogTask(createdProcess.errorReader(), true));
 				executorService.submit(new ProcOutputLogTask(createdProcess.inputReader(), false));
-	
+				
+				if (hasStartupWait()) {
+					
+					if (hasStartupPattern()) {
+						
+						synchronized (this.startupLock) {
+							
+							if (!this.startupPatternFound) {
+								
+								try {
+									startupLock.wait(this.options.startupWaitMs());
+								} catch (InterruptedException e) {
+								}
+							}
+						}
+						
+						if (!this.startupPatternFound) {
+							
+							logger.error("Failed finding startup pattern - {}", this.options);
+							createdProcess.destroy();
+							
+							this.closed = true;
+							
+							return false;
+						}
+						
+					} else {
+						
+						try {
+							Thread.sleep(this.options.startupWaitMs());
+						} catch (InterruptedException e) {}
+					}
+				}
+				
 				this.process = createdProcess;
 				
 				return true;
@@ -224,7 +293,7 @@ public class ProcOutputStreamImpl extends OutputStream {
 			
 			this.closed = true;
 	
-			switch (options.procOutDestroyMode) {
+			switch (options.destroyMode()) {
 			
 			case FORCIBLE:
 			
@@ -275,5 +344,15 @@ public class ProcOutputStreamImpl extends OutputStream {
 			
 			logger.error("error closing: " + options.command(), e);
 		}		
+	}
+	
+	static ProcOutputStreamImpl newImpl(ProcStreamOptions options, EvaluatorBean evaluatorBean) {
+		
+		long destroyWait = (options.destroyWait() != null) ?
+				((Number)evaluatorBean.eval(String.format("parseDuration(\"%s\")", 
+					options.destroyWait()))).longValue() : 
+				0L;
+		
+		return new ProcOutputStreamImpl(options, destroyWait);
 	}
 }

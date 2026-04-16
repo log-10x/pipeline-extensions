@@ -7,15 +7,16 @@ import java.util.Map;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.log10x.ext.edge.micrometer.MapRegistryConfig;
-import com.log10x.ext.edge.micrometer.MetricRegistryFactory;
-import com.log10x.ext.edge.micrometer.registry.PeriodicEmittingMetricRegistry.EmittingMetricRegistry;
-import com.log10x.ext.edge.micrometer.registry.PeriodicEmittingMetricRegistry.PeriodicEmittingConfig;
+import com.log10x.api.util.micrometer.MapRegistryConfig;
+import com.log10x.api.util.micrometer.MetricRegistryFactory;
+import com.log10x.api.util.micrometer.PeriodicEmittingMetricRegistry;
+import com.log10x.api.util.micrometer.PeriodicEmittingMetricRegistry.EmittingMetricRegistry;
+import com.log10x.api.util.micrometer.PeriodicEmittingMetricRegistry.PeriodicEmittingConfig;
 
 import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.prometheus.PrometheusConfig;
-import io.micrometer.prometheus.PrometheusMeterRegistry;
-import io.prometheus.client.exporter.PushGateway;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
+import io.prometheus.metrics.exporter.pushgateway.PushGateway;
 
 public class PrometheusPGMetricRegistryFactory implements MetricRegistryFactory {
 
@@ -41,7 +42,6 @@ public class PrometheusPGMetricRegistryFactory implements MetricRegistryFactory 
 			implements EmittingMetricRegistry {
 
 		private final String host;
-		private final String job;
 		private final PushGateway pushGateway;
 
 		protected PrometheusPGMetricRegistry(PrometheusPGMapConfig config, String host, String job) {
@@ -49,14 +49,17 @@ public class PrometheusPGMetricRegistryFactory implements MetricRegistryFactory 
 			super(config);
 
 			this.host = host;
-			this.job = job;
-			this.pushGateway = new PushGateway(host);
+			this.pushGateway = PushGateway.builder()
+					.address(host)
+					.job(job)
+					.registry(this.getPrometheusRegistry())
+					.build();
 		}
 
 		@Override
 		public void emit() {
 			try {
-				pushGateway.pushAdd(this.getPrometheusRegistry(), job);
+				pushGateway.pushAdd();
 			} catch (IOException e) {
 				logger.warn("Failed pushing to push gateway {}.", host, e);
 			}

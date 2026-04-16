@@ -11,8 +11,8 @@ import org.apache.logging.log4j.core.layout.AbstractStringLayout;
 
 /**
  * log4j2 layout plugin for logging a set of target fields values
- * from l1x Objects written to this output.
- * For an example use, see: {@link https://github.com/l1x-co/config/blob/main/pipelines/run/modules/output/event/appender/unix/log4j2.yaml}
+ * from tenxObjects written to this output.
+ * For an example use, see: {@link https://github.com/log-10x/config/blob/main/pipelines/run/modules/output/event/appender/unix/log4j2.yaml}
  */
 @Plugin(name = EncodeFieldsLayout.PLUGIN_NAME, 
 		category = Node.CATEGORY, 
@@ -20,20 +20,20 @@ import org.apache.logging.log4j.core.layout.AbstractStringLayout;
 		printObject = true)
 public abstract class EncodeFieldsLayout extends AbstractStringLayout {
     
-	public static final String PLUGIN_NAME = "l1xLayout";
+	public static final String PLUGIN_NAME = "tenxLayout";
 		
     @PluginFactory
     public static AbstractStringLayout createLayout(
         @PluginAttribute(value = "charset", defaultString = "UTF-8") final Charset charset,
     	
         /**
-         * list of l1xObject fields
+         * list of tenxObject fields
          */
         @PluginAttribute(value = "encodedFields") String encodedFields,
     	
         /**
-         * l1x JavaScript expression that must evaluate as truthy against
-         * the current l1xObject to write its {@code encodedFields}
+         * 10x JavaScript expression that must evaluate as truthy against
+         * the current tenxObject to write its {@code encodedFields}
          */
         @PluginAttribute(value = "filter") String filter,
     	
@@ -50,20 +50,20 @@ public abstract class EncodeFieldsLayout extends AbstractStringLayout {
         @PluginAttribute(value = "encodeDelimiter", defaultChar=' ') char encodeDelimiter,
     	
         /**
-         * an optional l1x JavaScript expression whose value is written to output
-         * when the l1x pipeline has reached eof.
+         * an optional 10x JavaScript expression whose value is written to output
+         * when the 10x pipeline has reached eof.
          */
         @PluginAttribute(value = "eofSignalExp") String eofSignalExp,
 
         /**
-         * an optional l1x JavaScript expression whose value is written to output
-         * when the l1x pipeline is flushed.
+         * an optional 10x JavaScript expression whose value is written to output
+         * when the 10x pipeline is flushed.
          */
         @PluginAttribute(value = "flushSignalExp") String flushSignalExp,
 
         /**
-         * an optional l1x JavaScript expression whose value is written to output
-         * when the l1x pipeline is queued.
+         * an optional 10x JavaScript expression whose value is written to output
+         * when the 10x pipeline is queued.
          */
         @PluginAttribute(value = "queueSignalExp") String queueSignalExp    		
     	) throws Exception {
@@ -74,7 +74,7 @@ public abstract class EncodeFieldsLayout extends AbstractStringLayout {
     }
     
     /**
-	 * this value is set by the l1x runtime
+	 * this value is set by the 10x engine
 	 */
 	public static Factory factory; 
 	

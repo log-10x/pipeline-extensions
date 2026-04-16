@@ -6,16 +6,17 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.util.Map;
 
-import com.log10x.ext.cloud.index.CompositeIndexReader;
-import com.log10x.ext.cloud.index.IndexTemplateReader;
+import com.log10x.api.eval.EvaluatorBean;
+import com.log10x.api.util.MapperUtil;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
+import com.log10x.ext.cloud.index.shared.CompositeIndexReader;
+import com.log10x.ext.cloud.index.shared.template.IndexTemplateReader;
 import com.log10x.ext.cloud.index.util.reader.LinebreakReader;
-import com.log10x.ext.edge.bean.EvaluatorBean;
-import com.log10x.ext.edge.json.MapperUtil;
 
 /**
  * This class is used to read an input object from an underlying KV storage
- * by first reading an stored l1xTemplates followed by the target object bytes.
+ * by first reading stored tenxTemplates followed by the target object bytes.
+ * See: {@link https://github.com/log-10x/modules/blob/main/pipelines/run/modules/input/objectStorage/index/stream.yaml}
  */
 public class IndexInputReader extends CompositeIndexReader {
 		
@@ -26,15 +27,15 @@ public class IndexInputReader extends CompositeIndexReader {
 	}
 
 	/**
-	 * this constructor is invoked by the l1x run-time.
+	 * this constructor is invoked by the 10x run-time.
 	 * 
 	 * @param 	args
-	 * 			a map arguments of arguments passed to the l1x cli for the
+	 * 			a map arguments of arguments passed to the 10x cli for the
 	 * `		target output for which this stream is instantiated
 	 * 
 	 * @param 	evaluatorBean
-	 * 			a reference to an l1x evaluator bean which allows this output
-	 * 			to interact with the l1x run-time 
+	 * 			a reference to an 10x evaluator bean which allows this output
+	 * 			to interact with the 10x run-time 
 	 */
 	public IndexInputReader(Map<String, Object> args, EvaluatorBean evaluatorBean) throws IllegalArgumentException, IOException{
 				
@@ -43,7 +44,7 @@ public class IndexInputReader extends CompositeIndexReader {
 	}
 	
 	@Override
-	protected Reader[] createReaders() throws IOException {
+	protected Reader[] createReaders(EvaluatorBean evaluatorBean) throws IOException {
 		
 		IndexWriteOptions indexWriteOptions = (IndexWriteOptions)this.options;
 		
@@ -56,7 +57,7 @@ public class IndexInputReader extends CompositeIndexReader {
 		LinebreakReader byteRangeReader = new LinebreakReader(new InputStreamReader(inputStream));
 		
 		// makes byte ranges avail to other streams in pipeline
-		evaluatorBean.dict(indexWriteOptions.key(), byteRangeReader);	
+		evaluatorBean.set(indexWriteOptions.key(), byteRangeReader);	
 		
 		return new Reader[] {templateReader, byteRangeReader};
 	}

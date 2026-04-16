@@ -8,7 +8,7 @@ import org.apache.logging.log4j.core.config.plugins.PluginFactory;
 import org.apache.logging.log4j.core.filter.AbstractFilter;
 
 /**
- * A log4j2 filter plugin that evaluates an {@link http://doc.log10x.com/docs/api/js/#L1xObject|l1x JavaScript} expression against the target l1xObject to log
+ * A log4j2 filter plugin that evaluates an {@link https://doc.log10x.com/api/js/#TenXObject|10x JavaScript} expression against the target tenxObject to log
  */
 @Plugin(name = ExpressionFilter.PLUGIN_NAME, 
 		category = Core.CATEGORY_NAME, 
@@ -17,7 +17,7 @@ import org.apache.logging.log4j.core.filter.AbstractFilter;
 
 public abstract class ExpressionFilter extends AbstractFilter {
 	
-	public static final String PLUGIN_NAME = "l1xFilter";
+	public static final String PLUGIN_NAME = "tenxFilter";
 		
     @PluginFactory
     public static AbstractFilter createFilter(
@@ -29,7 +29,7 @@ public abstract class ExpressionFilter extends AbstractFilter {
     }
     
     /**
-   	 * this value is set by the l1x runtime
+   	 * this value is set by the 10x engine
    	 */
 	public static Factory factory; 
 	

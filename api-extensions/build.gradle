@@ -1,0 +1,41 @@
+plugins {
+	id "com.google.protobuf"
+}
+
+apply plugin: "eclipse"
+
+dependencies {
+	implementation "org.apache.logging.log4j:log4j-core:${log4jVersion}"
+	implementation "io.micrometer:micrometer-registry-prometheus:${micrometerVersion}"
+	implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-xml:${jacksonVersion}"
+	implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${jacksonVersion}"
+	implementation "org.xerial.snappy:snappy-java:${snappyVersion}"
+	implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+	implementation "com.log10x:prometheus-remote-write:${remoteWriteVersion}"
+}
+
+eclipse {
+	classpath {
+		file {
+			whenMerged {
+				entries.each {
+					source ->
+					if (source.kind == 'src' && source.path.contains('generated')) {
+						source.entryAttributes['ignore_optional_problems'] = 'true'
+					}
+					
+				}
+			}
+		}
+	}
+}
+
+protobuf {
+	// Configure the protoc executable
+	//
+	protoc {
+		// Download from repositories
+		//
+		artifact = "com.google.protobuf:protoc:${protobufVersion}"
+	}
+}

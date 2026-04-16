@@ -3,8 +3,8 @@ package com.log10x.ext.cloud.micrometer.registry;
 import java.io.IOException;
 import java.util.Map;
 
-import com.log10x.ext.edge.micrometer.MapRegistryConfig;
-import com.log10x.ext.edge.micrometer.MetricRegistryFactory;
+import com.log10x.api.util.micrometer.MapRegistryConfig;
+import com.log10x.api.util.micrometer.MetricRegistryFactory;
 
 import io.micrometer.cloudwatch2.CloudWatchMeterRegistry;
 import io.micrometer.core.instrument.Clock;
@@ -15,6 +15,8 @@ import software.amazon.awssdk.services.cloudwatch.CloudWatchAsyncClient;
 
 /**
  * An implementation of the {@link MetricRegistryFactory} interface for AWS CloudWatch metrics
+ * 
+ * @see <a href="https://doc.log10x.com/run/output/metric/cloudwatch/">AWS CloudWatch Output</a>
  */
 public class CloudWatchMetricRegistryFactory implements MetricRegistryFactory {
 	

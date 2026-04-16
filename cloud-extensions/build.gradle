@@ -1,10 +1,10 @@
 dependencies {
 
-if ((project.hasProperty("fastutilmode")) &&
+	if ((project.hasProperty("fastutilmode")) &&
 		((project.getProperty("fastutilmode") == "debug") || (project.getProperty("fastutilmode") == "none"))) {
 		implementation "it.unimi.dsi:fastutil:${fastutilVersion}"
 	} else {
-		implementation files("../../l1x-inc/libs/fastutil-${fastutilVersion}-min.jar")
+		implementation files("$rootDir/libs/fastutil-${fastutilVersion}-min.jar")
 	}
 
 	implementation "org.apache.logging.log4j:log4j-core:${log4jVersion}"
@@ -17,7 +17,7 @@ if ((project.hasProperty("fastutilmode")) &&
 	implementation "io.micrometer:micrometer-registry-cloudwatch2:${micrometerVersion}"
 	implementation "io.micrometer:micrometer-registry-influx:${micrometerVersion}"
 	implementation "io.micrometer:micrometer-registry-prometheus:${micrometerVersion}"
-	implementation "io.prometheus:simpleclient_httpserver:${prometheusVersion}"
+	implementation "io.prometheus:prometheus-metrics-exporter-httpserver:${prometheusMetricsVersion}"
 	implementation "org.apache.camel:camel-core:${camelVersion}"
 	implementation "org.apache.camel:camel-stream:${camelVersion}"
 	implementation "org.apache.camel:camel-netty-http:${camelVersion}"
@@ -25,15 +25,25 @@ if ((project.hasProperty("fastutilmode")) &&
 	implementation "org.apache.camel:camel-jackson:${camelVersion}"
 	implementation "org.apache.camel:camel-yaml-dsl:${camelVersion}"
 	implementation "org.apache.camel:camel-jsonpath:${camelVersion}"
-	implementation "com.baqend:bloom-filter:${bloomFilterVersion}"
+	implementation "org.apache.camel:camel-aws2-s3:${camelVersion}"
+	implementation("com.baqend:bloom-filter:${bloomFilterVersion}") {
+		exclude group: 'org.msgpack', module: 'msgpack'
+	}
 	implementation "software.amazon.awssdk:lambda:${awsSdkVersion}"
+	implementation "software.amazon.awssdk:sqs:${awsSdkVersion}"
 	implementation "software.amazon.awssdk:s3:${awsSdkVersion}"
+	implementation "software.amazon.awssdk:sts:${awsSdkVersion}"
+	implementation "software.amazon.awssdk:auth:${awsSdkVersion}"
 	implementation "software.amazon.awssdk:aws-crt-client:${awsSdkVersion}"
+	implementation "com.fasterxml.jackson.core:jackson-core:${jacksonVersion}"
+	implementation "software.amazon.awssdk:cloudwatchlogs:${awsSdkVersion}"
 	implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-xml:${jacksonVersion}"
 	implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${jacksonVersion}"
 	implementation "org.unbescape:unbescape:${unbescapeVersion}"
+	implementation "org.kohsuke:github-api:${githubApiVersion}"
 
 	implementation(
+		project(":pipeline-extensions:api-extensions"),
 		project(":pipeline-extensions:edge-extensions")
 	)
 }

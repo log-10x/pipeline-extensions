@@ -1,12 +1,13 @@
 package com.log10x.ext.cloud.index.filter;
 
+import java.util.Map;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.log10x.ext.edge.json.MapperUtil;
+import com.log10x.api.util.MapperUtil;
 
 /**
- * A POJO class used for deserializing l1x Object timestamp, template hash
- * and var tokens from the input stream defined in:
- * {@link https://github.com/l1x-co/config/blob/main/pipelines/run/modules/output/cloud/index/stream.yaml}
+ * A POJO class used for deserializing tenxObject fields from the input stream defined in:
+ * {@link https://github.com/log-10x/modules/blob/main/pipelines/run/modules/input/objectStorage/index/stream.yaml}
  */
 public class EncodedEventInput {
 	
@@ -21,19 +22,26 @@ public class EncodedEventInput {
 	public long groupSequence;
 		
 	/**
-	 * epoch timestamps
+	 * epoch time stamps,https://doc.log10x.com/api/js/#TenXObject+timestamp
 	 */
 	public long[] timestamp;
 	
 	/**
-	 * templates hash. See: '/run/units/structure/template/settings.yaml'
+	 * TenXTemplate hash, see https://doc.log10x.com/api/js/#TenXBaseObject+templateHash
 	 */
 	public String templateHash;
 	
 	/**
-	 * var tokens (i.e. tokens not found in template)
-	 */
+	 * var tokens, see https://doc.log10x.com/api/js/#TenXBaseObject+vars
+	 * 
+	*/
 	public Object[] vars;
+
+	/**
+	 * enrichment values, see https://doc.log10x.com/run/initialize/#enrichmentfields
+	 */
+	public Map<Object, Object> enrichmentFields;
+
 	
 	/*
 	 * Renders a JSON object

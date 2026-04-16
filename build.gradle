@@ -14,11 +14,10 @@ def configureProject(project) {
 subprojects {
 	apply plugin: "java"
 	
-	sourceCompatibility = JavaVersion.VERSION_17
-	targetCompatibility = JavaVersion.VERSION_17
-
-	version = findProperty('overrideL1xVersion') ?: "0.3.0"
-	group = "com.log10x"
+	java {
+		sourceCompatibility = JavaVersion.VERSION_21
+		targetCompatibility = JavaVersion.VERSION_21
+	}
 
 	repositories {
 		mavenCentral()

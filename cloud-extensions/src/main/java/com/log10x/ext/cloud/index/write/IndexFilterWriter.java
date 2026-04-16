@@ -1,8 +1,11 @@
 package com.log10x.ext.cloud.index.write;
 
-import static com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.VALUES_TAG;
+import static com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.DEBUG_VALUES_TAG;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
@@ -16,16 +19,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.log10x.ext.cloud.index.BaseIndexWriter;
+import com.log10x.api.eval.EvaluatorBean;
+import com.log10x.api.util.MapperUtil;
 import com.log10x.ext.cloud.index.filter.EncodedBloomFilter;
 import com.log10x.ext.cloud.index.filter.EncodedBloomFilterBuilder;
 import com.log10x.ext.cloud.index.filter.EncodedEventInput;
-import com.log10x.ext.cloud.index.interfaces.IndexObjectKey;
 import com.log10x.ext.cloud.index.interfaces.InputStreamLinebreaks;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
-import com.log10x.ext.cloud.index.write.IndexWriteTarget.ByteRange;
-import com.log10x.ext.edge.bean.EvaluatorBean;
-import com.log10x.ext.edge.json.MapperUtil;
+import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.IndexObjectType;
+import com.log10x.ext.cloud.index.shared.BaseIndexWriter;
+import com.log10x.ext.cloud.index.shared.IndexFilterKey;
+import com.log10x.ext.cloud.index.shared.TokenSplitter;
+import com.log10x.ext.cloud.index.write.TargetObjectByteRangeIndex.TimestampByteRange;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
@@ -34,7 +39,7 @@ import it.unimi.dsi.fastutil.objects.ObjectIterator;
 /**
  * This class is used to write a set of bloom filters for an input stream
  * with a specified accuracy to a target KV storage. To see how this class
- * is wired into the l1x pipeline see: {@link https://github.com/l1x-co/config/blob/main/pipelines/run/modules/input/objectStorage/index/stream.yaml}
+ * is wired into the 10x pipeline see: {@link https://github.com/log-10x/modules/blob/main/pipelines/run/modules/input/objectStorage/index/stream.yaml}
  */
 public class IndexFilterWriter extends BaseIndexWriter {
 
@@ -48,29 +53,32 @@ public class IndexFilterWriter extends BaseIndexWriter {
 	protected class IndexBloomFilterBuilder extends EncodedBloomFilterBuilder {
 		
 		private final long resolutionEpoch;
-		private final IndexObjectKey key;
+		private final IndexFilterKey indexFilterKey;
 		
-		protected IndexBloomFilterBuilder(long resolutionEpoch, long targetHash, int byteRangeIndex) {
+		protected IndexBloomFilterBuilder(long resolutionEpoch, String targetHash, int byteRangeIndex) {
 			
-			super(((IndexWriteOptions)options).indexFetchErrorProb());
+			super(tokenSplitter, ((IndexWriteOptions)options).indexFetchErrorProb());
 			
 			this.resolutionEpoch = resolutionEpoch;
 			
-			this.key = new IndexObjectKey(
-					options.prefix(), pathTimestamp(), targetHash, byteRangeIndex, null);
+			this.indexFilterKey = IndexFilterKey.from(
+				options.target(), this.pathTimestamp(), 
+				targetHash, byteRangeIndex, null);
 		}
 		
 		@Override
-		protected int filterByteLen(String candidate) {
+		protected int filterByteLen(String filterCandidate) {
 			
-			String indexObjectPath = this.key.path(indexAccessor);
+			String filterPath = indexFilterKey.formatPath(indexAccessor);
 			
-			String key = String.join(indexAccessor.keyPathSeperator(), indexObjectPath, candidate);
+			String filterKey = String.join(indexAccessor.keyPathSeperator(), 
+				filterPath, filterCandidate);
 			
-			return indexAccessor.keyByteLength(key);
+			return indexAccessor.keyByteLength(filterKey);
 		}
 		
 		protected long pathTimestamp() {
+			
 			return (this.resolutionEpoch == 0
 					? this.minEpoch
 					: this.resolutionEpoch);
@@ -111,7 +119,7 @@ public class IndexFilterWriter extends BaseIndexWriter {
 		@Override
 		public String toString() {
 			
-			return String.format("Filters(%s)", builder.key.path(indexAccessor));
+			return builder.indexFilterKey.formatPath(indexAccessor);
 		}
 	}
 	
@@ -122,18 +130,14 @@ public class IndexFilterWriter extends BaseIndexWriter {
 			latch.countDown();
 		}
 	}
-	
-	private final long epochResolution;
-	
-	private final long byteRangeLength;
-	
+		
 	private final long now;
 
 	private final Long2ObjectOpenHashMap<IndexBloomFilterBuilder> currBuilders;
 	
-	private final IndexWriteTarget metaIndex;
+	private final TargetObjectByteRangeIndex byteRangeIndex;
 	
-	private final IndexWriteReverseObject reverseIndex;
+	private final TargetObjectReverseIndex reverseIndex;
 	
 	private final EncodedEventInput currEventInput;
 	
@@ -144,6 +148,8 @@ public class IndexFilterWriter extends BaseIndexWriter {
 	private final AtomicInteger indexValues;
 	
 	private final AtomicInteger indexFilters;
+	
+	private final TokenSplitter tokenSplitter;
 	
 	private InputStreamLinebreaks linebreaks;
 	
@@ -164,24 +170,26 @@ public class IndexFilterWriter extends BaseIndexWriter {
 	private volatile boolean closed;
 
 	/**
-	 * this constructor is invoked by the l1x runtime.
+	 * this constructor is invoked by the 10x engine.
 	 * 
 	 * @param 	args
 	 * 			the values of the 'IndexWrite' option group
 	 * 		    instance for which the IndexFilterWriter is instantiated
 	 * 
 	 * @param 	evaluatorBean
-	 * 			a reference to an l1x evaluator bean which allows this input
-	 * 			to interact with the l1x run-time 
+	 * 			a reference to an 10x evaluator bean which allows this input
+	 * 			to interact with the 10x run-time 
+	 * @throws IllegalArgumentException 
+	 * @throws NoSuchAlgorithmException 
 	 */
-	public IndexFilterWriter(Map<String, Object> args, EvaluatorBean evaluatorBean){
+	public IndexFilterWriter(Map<String, Object> args, EvaluatorBean evaluatorBean) throws NoSuchAlgorithmException, IllegalArgumentException{
 		
 		this(MapperUtil.jsonMapper.convertValue(args,
 			IndexWriteOptions.class), null, evaluatorBean);
 	}
 	
 	public IndexFilterWriter(IndexWriteOptions options, 
-		ObjectStorageIndexAccessor indexAccessor, EvaluatorBean evaluatorBean) {
+		ObjectStorageIndexAccessor indexAccessor, EvaluatorBean evaluatorBean) throws NoSuchAlgorithmException {
 			
 		super(options, indexAccessor, evaluatorBean);
 		
@@ -191,25 +199,30 @@ public class IndexFilterWriter extends BaseIndexWriter {
 		
 		this.currBuilders = new Long2ObjectOpenHashMap<>();
 		
-		this.metaIndex = new IndexWriteTarget(options.indexReadObject, hash(options.indexReadObject));
+		MessageDigest digest = MessageDigest.getInstance("MD5");
 		
-		this.reverseIndex = new IndexWriteReverseObject(options.indexContainer());
-        this.currEventInput = new EncodedEventInput();       
+		byte[] bytes = digest.digest(options.indexReadObject.getBytes());
 		
-        this.epochResolution = this.parse("parseDuration", options.indexWriteResolution);    
-		this.byteRangeLength = this.parse("parseBytes", options.indexWriteByteRange);    
+		String targetHash = Base64.getUrlEncoder().encodeToString(bytes);
+				
+		this.byteRangeIndex = new TargetObjectByteRangeIndex(options.indexReadObject, targetHash);		
+		this.reverseIndex = new TargetObjectReverseIndex();
+        
+		this.currEventInput = new EncodedEventInput();       
 
 		this.indexBytes = new AtomicInteger();
-		this.indexValues = new AtomicInteger();	
-		this.indexFilters = new AtomicInteger();	
+		this.indexValues = new AtomicInteger();
+		this.indexFilters = new AtomicInteger();
 
 		evaluatorBean.debugState("indexBytes", this.indexBytes);
 		evaluatorBean.debugState("indexValues", this.indexValues);
 		evaluatorBean.debugState("indexFilters", this.indexFilters);
-		
+
+		this.tokenSplitter = TokenSplitter.create(evaluatorBean);
+
 		this.executorService = Executors.newSingleThreadExecutor();
 		this.latch = new CountDownLatch(1);
-		
+
 		this.lastTimestamp = now;
 	}
 	
@@ -219,7 +232,7 @@ public class IndexFilterWriter extends BaseIndexWriter {
 
 		for (EncodedBloomFilter encodedFilter : encodedFilters) {
 		
-			String indexObjectPath = builder.key.path(indexAccessor);
+			String indexFilterPath = builder.indexFilterKey.formatPath(this.indexAccessor);
 
 			Map<String, String> tags;
 			
@@ -229,15 +242,15 @@ public class IndexFilterWriter extends BaseIndexWriter {
 				String filterValues = encodedFilter.values.toString();
 				String base64Values = Base64.getEncoder().encodeToString(filterValues.getBytes());
 				
-				tags = Map.of(VALUES_TAG, base64Values);
+				tags = Map.of(DEBUG_VALUES_TAG, base64Values);
 						
 			} else {
 				
 				tags = Collections.emptyMap();
 			}
 			
-			String objectPath = indexAccessor.putIndexObject(indexObjectPath,
-				encodedFilter.encodedFilter, null, tags);	
+			String outputObjectKey = indexAccessor.putObject(indexFilterPath,
+				encodedFilter.encodedFilter, null, 0L, tags);	
 			
 			filterStats.addFilter(encodedFilter.prob, 
 				encodedFilter.byteLen, encodedFilter.elementSize);
@@ -246,7 +259,7 @@ public class IndexFilterWriter extends BaseIndexWriter {
 			indexBytes.addAndGet(encodedFilter.byteLen);
 			indexValues.addAndGet(encodedFilter.elementSize);
 		
-			reverseIndex.indexObjects.add(objectPath);
+			reverseIndex.indexObjects.add(outputObjectKey);
 		}
 		
 		filterStats.addFilterGroup(encodedFilters.size());
@@ -260,15 +273,23 @@ public class IndexFilterWriter extends BaseIndexWriter {
 		
 		String key = options().key();
 		
-		Object value = evaluatorBean.dict(key);
+		Object value = evaluatorBean.get(key);
 		
 		return (value instanceof InputStreamLinebreaks) ?
 			(InputStreamLinebreaks)value :
 			null;
 	}
 	
-	private void appendToFilterBuilder(long epoch) throws IOException {
+	private void appendToFilterBuilder(long timestamp) throws IOException {
 		
+		long epoch;
+
+		if (timestamp > 0) {
+			epoch = timestamp;
+		} else {
+			epoch = (USE_NOW_FOR_MISSING_TIMESTAMPS ? this.now : this.lastTimestamp);
+		}
+
 		this.currMinByteRangeTimestamp = (this.currMinByteRangeTimestamp > 0) ?
 				Math.min(this.currMinByteRangeTimestamp, epoch) :
 				epoch;
@@ -286,7 +307,7 @@ public class IndexFilterWriter extends BaseIndexWriter {
 		} else {
 			
 			long milliEpoch = TimeUnit.MILLISECONDS.toMillis(epoch);
-			resolutionEpoch = milliEpoch - (milliEpoch % this.epochResolution);
+			resolutionEpoch = milliEpoch - (milliEpoch % options().indexWriteResolution);
 		}
 		
 		IndexBloomFilterBuilder builder = currBuilders.get(resolutionEpoch);
@@ -294,7 +315,8 @@ public class IndexFilterWriter extends BaseIndexWriter {
 		if (builder == null) {
 			
 			builder = new IndexBloomFilterBuilder(
-					resolutionEpoch, this.metaIndex.targetHash, this.currByteRangeIndex);
+				resolutionEpoch, this.byteRangeIndex.targetHash, 
+				this.currByteRangeIndex);
 			
 			currBuilders.put(resolutionEpoch, builder);
 			
@@ -305,7 +327,7 @@ public class IndexFilterWriter extends BaseIndexWriter {
 	}
 	
 	/**
-	 * append the current l1x Object to the target bloom filter builder
+	 * append the current tenxObject to the target bloom filter builder
 	 */
 	@Override
 	public synchronized void flush() throws IOException {
@@ -320,7 +342,7 @@ public class IndexFilterWriter extends BaseIndexWriter {
 		
 		long currByteRangeLength = this.currEventLineStart - this.currByteRangeStart;
 
-		if (currByteRangeLength > this.byteRangeLength) {
+		if (currByteRangeLength > options().indexWriteByteRange) {
 											
 			this.writeByteRange(this.currByteRangeStart, (int)currByteRangeLength - 1);			
 			
@@ -339,35 +361,44 @@ public class IndexFilterWriter extends BaseIndexWriter {
 				readerForUpdating(this.currEventInput).
 				readValue(this.currChars);
 	
+			// Epoch timestamps can be in several different resolutions.
+			// Align all to MS so there are no inconsistencies later in the process.
+			//
+			for (int i = 0; i < currEventInput.timestamp.length; i++) {
+				long timestampMs = toEpochMilli(currEventInput.timestamp[i]);
+				
+				currEventInput.timestamp[i] = timestampMs;
+			}
+			
 			long eventSequence = currEventInput.groupSequence - 1;
 								
 			this.currEventLineStart = linebreaks.pos(eventSequence);
 			this.currEventSequence = eventSequence;
-			
+
 			if (currEventInput.timestamp.length > 0) {
-				
+
 				if (INDEX_ALL_TIMESTAMPS) {
-				
+
 					for (long timestamp : currEventInput.timestamp) {
 						this.appendToFilterBuilder(timestamp);
-						
-						this.lastTimestamp = timestamp;
+
+						if (timestamp > 0) {
+							this.lastTimestamp = timestamp;
+						}
 					}
-					
+
 				} else {
-				
+
 					this.appendToFilterBuilder(currEventInput.timestamp[0]);
-					
-					this.lastTimestamp = currEventInput.timestamp[0];
+
+					if (currEventInput.timestamp[0] > 0) {
+						this.lastTimestamp = currEventInput.timestamp[0];
+					}
 				}
-	
+
 			} else {
-				
-				long timestampToUse = (USE_NOW_FOR_MISSING_TIMESTAMPS
-						? this.now
-						: this.lastTimestamp);
-				
-				this.appendToFilterBuilder(timestampToUse);
+
+				this.appendToFilterBuilder(0);
 			}
 				
 		} catch (Exception e) {
@@ -379,14 +410,34 @@ public class IndexFilterWriter extends BaseIndexWriter {
 			super.flush();
 		}
 	}
-	
+
+	private static long toEpochMilli(long epochTime) {
+		// Try milliseconds first
+		if (epochTime > 1_000_000_000_000L && epochTime < 10_000_000_000_000L) {
+			return epochTime; // Likely milliseconds
+		}
+		// Try seconds
+		if (epochTime > 1_000_000_000L && epochTime < 10_000_000_000L) {
+			return epochTime * 1000; // Convert seconds to milliseconds
+		}
+		// Try microseconds
+		if (epochTime > 1_000_000_000_000_000L && epochTime < 10_000_000_000_000_000L) {
+			return epochTime / 1000; // Convert microseconds to milliseconds
+		}
+		// Try nanoseconds
+		if (epochTime > 1_000_000_000_000_000_000L) {
+			return epochTime / 1_000_000; // Convert nanoseconds to milliseconds
+		}
+		throw new IllegalArgumentException("Invalid epoch time: " + epochTime);
+	}
+
 	private void writeByteRange(long start, int length) {
 
-		ByteRange byteRange = new ByteRange(
-				start, length, currMinByteRangeTimestamp, currMaxByteRangeTimestamp);
+		TimestampByteRange byteRange = new TimestampByteRange(start, length, 
+			this.currMinByteRangeTimestamp, this.currMaxByteRangeTimestamp);
 
 		ObjectIterator<Long2ObjectMap.Entry<IndexBloomFilterBuilder>> iter =
-				currBuilders.long2ObjectEntrySet().fastIterator();
+			currBuilders.long2ObjectEntrySet().fastIterator();
 
 		while (iter.hasNext()) {
 
@@ -394,10 +445,10 @@ public class IndexFilterWriter extends BaseIndexWriter {
 
 			IndexBloomFilterBuilder filterBuilder = entry.getValue();
 
-			this.executorService.submit(new WriteFiltersTask(filterBuilder));
+			executorService.submit(new WriteFiltersTask(filterBuilder));
 		}
 
-		this.metaIndex.byteRanges.add(byteRange);
+		byteRangeIndex.byteRanges.add(byteRange);
 
 		this.currByteRangeIndex++;
 		this.currBuilders.clear();
@@ -415,52 +466,78 @@ public class IndexFilterWriter extends BaseIndexWriter {
 		
 		this.closed = true;
 		
-		try {
+		if (this.linebreaks != null) {
+		
+			try {
+					
+				long start = this.currByteRangeStart;
+				long end = linebreaks.endPos();
 				
-			long start = this.currByteRangeStart;
-			long end = linebreaks.endPos();
-			
-			this.writeByteRange(start, (int)(end - start));
-			
-			if (this.executorService != null) {
+				this.writeByteRange(start, (int)(end - start));
 				
-				this.executorService.submit(new FinishWriteTask());
-				
-				this.executorService.shutdown();
-				
-				this.latch.await();
-			}
+				if (this.executorService != null) {
+					
+					this.executorService.submit(new FinishWriteTask());
+					
+					this.executorService.shutdown();
+					
+					this.latch.await();
+				}
+	
+				this.writeByteRangeIndex();
+				this.writeReverseIndex();
 
-			writeMetaIndex();
-			writeReverseIndex();
-			
-			filterStats.logStats();
-			
-		} catch (Exception e) {
-			logger.error("error closing: " + this, e);
-			
+				filterStats.logStats();
+
+				if (logger.isInfoEnabled()) {
+					long minTs = Long.MAX_VALUE;
+					long maxTs = Long.MIN_VALUE;
+					for (TimestampByteRange br : byteRangeIndex.byteRanges) {
+						if (br.minTimestamp > 0 && br.minTimestamp < minTs) minTs = br.minTimestamp;
+						if (br.maxTimestamp > maxTs) maxTs = br.maxTimestamp;
+					}
+					logger.info("index written: object={}, byteRanges={}, filters={}, values={}, " +
+						"minTimestamp={} ({}), maxTimestamp={} ({})",
+						byteRangeIndex.target,
+						byteRangeIndex.byteRanges.size(),
+						indexFilters.get(),
+						indexValues.get(),
+						minTs, new java.util.Date(minTs),
+						maxTs, new java.util.Date(maxTs));
+				}
+				
+			} catch (Exception e) {
+				
+				logger.error("error closing: " + this, e);
+				
+			}
 		}
 		
 		super.close();
 	}
 	
-	private void writeMetaIndex() throws IOException {
+	private void writeByteRangeIndex() throws IOException {
 
-		if (this.metaIndex.byteRanges.isEmpty()) {
+		if (byteRangeIndex.byteRanges.isEmpty()) {
 			return;
 		}
 		
-		String metaIndexName = String.valueOf(this.metaIndex.targetHash);
-		String metaIndexPath = this.indexAccessor.metaIndexPath(options().prefix());
+		String byteRangeIndexPath = indexAccessor.indexObjectPath(IndexObjectType.byteRange, 
+			options().target());
 		
-		String body = MapperUtil.jsonMapper.writeValueAsString(this.metaIndex);
+		String body = MapperUtil.jsonMapper.writeValueAsString(this.byteRangeIndex);
 		
 		if (logger.isDebugEnabled()) {
-			logger.debug("meta index for " + this.metaIndex.target + ": " + body);
+			logger.debug("byte range index for: " + byteRangeIndex.target + ": " + body);
 		}
 		
+		byte[] bytes = body.getBytes();
+		
 		String path = indexAccessor.putObject(
-				metaIndexPath, metaIndexName, body, Collections.emptyMap());
+			byteRangeIndexPath, String.valueOf(byteRangeIndex.targetHash), 
+			new ByteArrayInputStream(bytes), bytes.length,
+			Collections.emptyMap()
+		);
 		
 		reverseIndex.indexObjects.add(path);
 	}
@@ -470,18 +547,24 @@ public class IndexFilterWriter extends BaseIndexWriter {
 		if (reverseIndex.indexObjects.isEmpty()) {
 			return;
 		}
-		
-		String reverseIndexName = options().indexReadObject;
-		String reverseIndexPath = this.indexAccessor.reverseIndexPath(options().prefix());
+
+		String reverseIndexPath = indexAccessor.indexObjectPath(IndexObjectType.reverseIndex,
+			options().target());
+
+		String reverseIndexTarget = options().indexReadObject;
 		
 		String body = MapperUtil.jsonMapper.writeValueAsString(this.reverseIndex);
 		
 		if (logger.isDebugEnabled()) {
-			logger.debug("reverse index for " + reverseIndexName + ": " + body);
+			logger.debug("reverse index for: " + reverseIndexTarget + ": " + body);
 		}
 		
+		byte[] bytes = body.getBytes();
+		
 		indexAccessor.putObject(reverseIndexPath,
-				reverseIndexName, body, Collections.emptyMap());	
+			reverseIndexTarget, new ByteArrayInputStream(bytes), bytes.length,
+			Collections.emptyMap()
+		);	
 	}
 	
 	@Override
@@ -490,15 +573,5 @@ public class IndexFilterWriter extends BaseIndexWriter {
 		return String.format("builders: %s\nreverseIndex: %s",
 			currBuilders.toString(), 
 			reverseIndex.indexObjects.toString());
-	}
-
-	private static long hash(String s) {
-		long result = 0;
-
-		for (int i = 0; i < s.length(); i++) {
-			result = 31 * result + s.charAt(i);
-		}
-
-		return result;
 	}
 }

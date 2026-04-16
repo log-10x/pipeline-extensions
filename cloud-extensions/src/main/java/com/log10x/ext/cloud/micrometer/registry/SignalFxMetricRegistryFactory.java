@@ -3,8 +3,8 @@ package com.log10x.ext.cloud.micrometer.registry;
 import java.io.IOException;
 import java.util.Map;
 
-import com.log10x.ext.edge.micrometer.MapRegistryConfig;
-import com.log10x.ext.edge.micrometer.MetricRegistryFactory;
+import com.log10x.api.util.micrometer.MapRegistryConfig;
+import com.log10x.api.util.micrometer.MetricRegistryFactory;
 
 import io.micrometer.core.instrument.Clock;
 import io.micrometer.signalfx.SignalFxConfig;

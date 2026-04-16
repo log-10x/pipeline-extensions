@@ -5,8 +5,13 @@ import java.nio.CharBuffer;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import com.log10x.ext.cloud.index.shared.TokenSplitter;
 import com.signalfx.shaded.google.common.base.Utf8;
 
 import orestes.bloomfilter.BloomFilter;
@@ -20,7 +25,9 @@ import orestes.bloomfilter.FilterBuilder;
  * This class in NOT thread-safe.
  */
 public class EncodedBloomFilterBuilder {
-		
+
+	private static final Logger logger = LogManager.getLogger(EncodedBloomFilterBuilder.class);
+
 	public static final boolean DEBUG = true;
 		
 	private final static int MIN_ITEMS = 10000;
@@ -30,24 +37,27 @@ public class EncodedBloomFilterBuilder {
 	private final static int MIN_BUFFER_SIZE = 1024;
 				
 	private final Set<String> valueSet;
-	
+
 	private final List<String> values;
-	
+
 	private final List<EncodedBloomFilter> encodedFilters;
-	
+
+	private final TokenSplitter tokenSplitter;
+
 	private final int minFilterProbability;
-				
+
 	private CharBuffer charBuffer;
-	
+
 	protected long maxEpoch;
-	
+
 	protected long minEpoch;
-		
-	public EncodedBloomFilterBuilder(int minFilterProbability) {
-				
+
+	public EncodedBloomFilterBuilder(TokenSplitter tokenSplitter, int minFilterProbability) {
+
+		this.tokenSplitter = tokenSplitter;
 		this.minFilterProbability = minFilterProbability;
-		this.valueSet = new HashSet<String>();	
-		this.encodedFilters = new ArrayList<>();	
+		this.valueSet = new HashSet<String>();
+		this.encodedFilters = new ArrayList<>();
 		this.values = new ArrayList<>();
 	}
 	
@@ -149,7 +159,42 @@ public class EncodedBloomFilterBuilder {
 			}	
 		}		
 	}
-			
+
+	private void appendValue(Object value, boolean applyDelimiters) {
+
+		if (value == null) {
+			return;
+		}
+
+		if (value instanceof List<?>) {
+
+			for (Object item : ((List<?>) value)) {
+				this.appendValue(item, applyDelimiters);
+			}
+
+		} else if (value instanceof Map<?, ?>) {
+
+			for (Object item : ((Map<?, ?>) value).values()) {
+
+				this.appendValue(item, applyDelimiters);
+			}
+
+		} else {
+			String str = value.toString();
+
+			if ((str == null) ||
+				(str.isBlank())) {
+				return;
+			}
+
+			if (applyDelimiters) {
+				this.tokenSplitter.fill(str, valueSet);
+			} else {
+				this.valueSet.add(str);
+			}
+		}
+	}
+
 	public void append(EncodedEventInput output, long epoch) throws IOException {
 		
 		this.maxEpoch = (this.maxEpoch > 0) ?
@@ -160,12 +205,33 @@ public class EncodedBloomFilterBuilder {
 			Math.min(this.minEpoch, epoch) :
 			epoch;
 		
-		valueSet.add(output.templateHash);
-				
-		for (Object var : output.vars) {		
-			valueSet.add(String.valueOf(var));	
+		this.appendValue(output.templateHash, false);
+
+		if (output.vars != null) {
+
+			for (Object var : output.vars) {
+				this.appendValue(var, false);
+			}
 		}
-				
+
+		if (output.enrichmentFields != null) {
+
+			int beforeSize = valueSet.size();
+			for (Map.Entry<Object, Object> entry : output.enrichmentFields.entrySet()) {
+
+				this.appendValue(entry.getValue(), true);
+			}
+			int afterSize = valueSet.size();
+			if (logger.isWarnEnabled()) {
+				logger.warn("[TRACE-Q] BloomFilterBuilder.append: enrichmentFields.size={}, keys={}, valueSet grew {}→{} (+{})",
+					output.enrichmentFields.size(), output.enrichmentFields.keySet(),
+					beforeSize, afterSize, afterSize - beforeSize);
+			}
+		} else {
+			logger.warn("[TRACE-Q] BloomFilterBuilder.append: enrichmentFields=null, templateHash={}, vars={}",
+				output.templateHash, output.vars != null ? output.vars.length : "null");
+		}
+
 		int size = valueSet.size();
 		
 		int stepCheck = (size - MIN_ITEMS) % STEP_CHECK_FULL;

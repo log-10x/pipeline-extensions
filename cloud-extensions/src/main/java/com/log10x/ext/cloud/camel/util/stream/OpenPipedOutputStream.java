@@ -11,6 +11,11 @@ public class OpenPipedOutputStream extends PipedOutputStream {
 	public OpenPipedOutputStream(PipedInputStream snk) throws IOException {
 		super(snk);
 	}
+	
+	@Override
+	public void write(byte[] b, int off, int len) throws IOException {
+		super.write(b, off, len);
+	}
 
 	@Override
 	public void close() throws IOException {

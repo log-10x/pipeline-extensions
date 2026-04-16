@@ -8,7 +8,7 @@ import org.apache.logging.log4j.core.lookup.StrLookup;
 
 /**
  * A log4j2 lookup plugin to return the OS directory file separator.
- * Used by: {@link https://github.com/l1x-co/config/blob/main/pipelines/run/modules/input/forwarder/filebeat/input/log4j2.yaml}
+ * Used by: {@link https://github.com/log-10x/config/blob/main/pipelines/run/modules/input/forwarder/filebeat/input/log4j2.yaml}
  */
 @Plugin(name = FileSeperatorLookup.PLUGIN_NAME, 
 		category = StrLookup.CATEGORY)

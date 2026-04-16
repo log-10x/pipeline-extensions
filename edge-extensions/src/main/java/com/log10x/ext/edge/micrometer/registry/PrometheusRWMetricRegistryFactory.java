@@ -7,17 +7,19 @@ import java.util.Map;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.log10x.ext.edge.micrometer.MapRegistryConfig;
-import com.log10x.ext.edge.micrometer.MetricRegistryFactory;
-import com.log10x.ext.edge.micrometer.registry.PeriodicEmittingMetricRegistry.EmittingMetricRegistry;
-import com.log10x.ext.edge.micrometer.registry.PeriodicEmittingMetricRegistry.PeriodicEmittingConfig;
-import com.log10x.ext.edge.prometheus.PrometheusClient;
-import com.log10x.ext.edge.util.HttpUtil;
-import com.log10x.l1x.prometheus.RemoteWrite.WriteRequest;
+import com.log10x.api.util.HttpUtil;
+import com.log10x.api.util.micrometer.MapRegistryConfig;
+import com.log10x.api.util.micrometer.MetricRegistryFactory;
+import com.log10x.api.util.micrometer.PeriodicEmittingMetricRegistry;
+import com.log10x.api.util.micrometer.PeriodicEmittingMetricRegistry.EmittingMetricRegistry;
+import com.log10x.api.util.micrometer.PeriodicEmittingMetricRegistry.PeriodicEmittingConfig;
+import com.log10x.api.util.prometheus.PrometheusClient;
+import com.log10x.api.util.prometheus.PrometheusRequestBuilder;
+import com.log10x.prometheus.remotewrite.RemoteWrite.WriteRequest;
 
 import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.prometheus.PrometheusConfig;
-import io.micrometer.prometheus.PrometheusMeterRegistry;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 
 public class PrometheusRWMetricRegistryFactory implements MetricRegistryFactory {
 
@@ -45,22 +47,25 @@ public class PrometheusRWMetricRegistryFactory implements MetricRegistryFactory 
 			implements EmittingMetricRegistry {
 
 		private final PrometheusClient client;
+		private final PrometheusRequestBuilder requestBuilder;
 
 		protected PrometheusRWMetricRegistry(PrometheusRWMapConfig config, PrometheusClient client) {
 
 			super(config);
 
 			this.client = client;
+			this.requestBuilder = new PrometheusRequestBuilder();
 		}
 
 		@Override
 		public void emit() {
 
-			WriteRequest.Builder writeRequest = PrometheusClient.buildWriteRequest(this.getPrometheusRegistry());
+			WriteRequest.Builder writeRequest = this.requestBuilder.buildWriteRequest(
+					this.getPrometheusRegistry());
 
 			if (writeRequest != null) {
 				try {
-					client.sendWriteRequest(writeRequest.build(), false);
+					client.sendWriteRequest(writeRequest.build());
 				} catch (Exception e) {
 					logger.warn("Failed sending write request to {}.", client.host, e);
 				}
@@ -77,16 +82,16 @@ public class PrometheusRWMetricRegistryFactory implements MetricRegistryFactory 
 
 		String host = config.get(HOST, true);
 
-		String encodedAuth = auth(config);
+		Map<String, String> auth = auth(config);
 
-		PrometheusClient client = new PrometheusClient(host, encodedAuth);
+		PrometheusClient client = new PrometheusClient(host, auth);
 
 		EmittingMetricRegistry internalRegistry = new PrometheusRWMetricRegistry(config, client);
 
 		return new PeriodicEmittingMetricRegistry(internalRegistry, step.toMillis());
 	}
 
-	private static String auth(PrometheusRWMapConfig config) {
+	private static Map<String, String> auth(PrometheusRWMapConfig config) {
 
 		String user = config.get(USER);
 
@@ -94,13 +99,17 @@ public class PrometheusRWMetricRegistryFactory implements MetricRegistryFactory 
 
 			String pass = config.get(PASS, true);
 
-			return HttpUtil.basicAuth(user, pass);
+			String basic = HttpUtil.basicAuth(user, pass);
+			
+			return Map.of("Authorization", basic);
 		}
 
 		String token = config.get(TOKEN);
 
 		if (token != null) {
-			return HttpUtil.bearerAuth(token);
+			String bearer = HttpUtil.bearerAuth(token);
+			
+			return Map.of("Authorization", bearer);
 		}
 
 		return null;

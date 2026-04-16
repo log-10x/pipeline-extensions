@@ -8,7 +8,7 @@ import java.util.List;
  * from an input object residing within a KV storage, and extract events
  * falling within a time range and matching a set of search terms.
  * To learn more more, see:
- * {@link https://github.com/l1x-co/config/blob/main/pipelines/run/modules/input/index/object/options.yaml }
+ * {@link https://github.com/log-10x/config/blob/main/pipelines/run/modules/input/index/object/options.yaml }
 
  */
 public class QueryObjectsOptions {

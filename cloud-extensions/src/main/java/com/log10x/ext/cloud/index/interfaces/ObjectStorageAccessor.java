@@ -9,10 +9,10 @@ import java.util.Map;
 
 /**
  * This interface provides a simple abstraction over an object storage
- * that can be used to index and query l1x Objects from. Implementations
+ * that can be used to index and query tenxObjects from. Implementations
  * of this interface can cover local file systems, DBs or more commonly
  * a Cloud object storage such as AWS S3, Azure Blobs and GCP Cloud storage.
- * For an AWS implementation, see: {@link com.log10x.l1x.index.access.AWSIndexAccess}
+ * For an AWS S3 implementation see: {@AWSIndexAccess}
  */
 public interface ObjectStorageAccessor extends Closeable {
 
@@ -50,36 +50,17 @@ public interface ObjectStorageAccessor extends Closeable {
 	 * @param 	searchAfter
 	 * 			where to to start listing from. Can be any key in the container.
 	 * 
+	 * @param	failOnMissing
+	 * 			If true, throw exception when the object path is missing entirely.
+	 * 
 	 * @return 	an iterator of index object names starting with {@code prefix}
 	 * 			and greater than {@code searchAfter}
 	 * 
 	 * @throws IOException 	if key cannot be read
 	 * 
 	 */
-	public Iterator<List<String>> iterateObjectKeys(String prefix, String searchAfter) throws IOException;
+	public Iterator<List<String>> iterateObjectKeys(String prefix, String searchAfter, boolean failOnMissing) throws IOException;
 	
-	/**
-	 * Stores a KV pair in the underlying storage
-	 * 
-	 * @param 	prefix
-	 * 			value prefixed to {@code key} which constitutes the full key name
-	 * 			under which the object is stored.
-	 
-	 * @param 	key
-	 * 			the key to use when storing the KV pair.
-	 * 
-	 * @param 	value
-	 * 			value to store
-	 *
-	 * @param 	tags
-	 * 			tag values to associate with the underlying KV pair to be stored.
-	 * 
-	 * @return 	the path within the underlying storage to which the object was written to.
-	 * 
-	 * @throws IOException if the value could not be stored
-	 */
-	public String putObject(String prefix, String key, String value, Map<String, String> tags) throws IOException;
-
 	/**
 	 * Read a blob from the underlying object storage
 	 * 
@@ -99,11 +80,47 @@ public interface ObjectStorageAccessor extends Closeable {
 	public InputStream readObject(String key, long off, int len) throws IOException;
 	
 	/**
-	 * The separator used to concat values in order to form a full key
+	 * The separator used to join values in order to form a full key
 	 * within the underlying storage. For example, for an AWS S3 bucket or NIX FS this 
 	 * would return '/', while for a WIN FS this would return '\'. 
 	 * 
 	 * @return the storage specific key separator to use
 	 */
 	public String keyPathSeperator();
+	
+	/**
+	 * Stores an index object in the underlying storage
+	 * 
+	 * @param 	prefix
+	 * 			value prefixed to {@code key} which constitutes the full key name
+	 * 			under which the object is stored (e.g., path)
+	 
+	 * @param 	key
+	 * 			the key to use when storing the KV pair.
+	 * 
+	 * @param 	content
+	 * 			data to store
+	 * 
+	 * @param 	contentLength
+	 * 			Byte length of content
+	 *
+	 * @param 	tags
+	 * 			tag values to associate with the KV pair to store.
+	 * 
+	 * @return 	the path within the underlying storage to which the object was written to.
+	 * 
+	 * @throws IOException if the value could not be stored
+	 */
+	public String putObject(String prefix, String key, InputStream content, long contentLength,
+		Map<String, String> tags) throws IOException;
+	
+	/**
+	 * 
+	 * Delete a target list of objects from storage
+	 * 
+	 * @param keys	objects to delete
+	 * 			
+	 * @return		number of objects deleted
+	 */
+	public int deleteObjects(List<String> keys);
 }

@@ -7,47 +7,49 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonMappingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
-import com.log10x.ext.cloud.index.BaseIndexWriter;
+import com.log10x.api.eval.EvaluatorBean;
+import com.log10x.api.pipeline.endpoint.PipelineLaunchRequest;
+import com.log10x.api.pipeline.launch.PipelineLaunchOptions;
+import com.log10x.api.util.MapperUtil;
 import com.log10x.ext.cloud.index.client.IndexQueryClient;
 import com.log10x.ext.cloud.index.filter.DecodedBloomFilter;
-import com.log10x.ext.cloud.index.interfaces.IndexObjectKey;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
+import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.IndexObjectType;
+import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.QueryLogLevel;
+import com.log10x.ext.cloud.index.shared.BaseIndexWriter;
+import com.log10x.ext.cloud.index.shared.IndexFilterKey;
+import com.log10x.ext.cloud.index.shared.TokenSplitter;
 import com.log10x.ext.cloud.index.util.ExecutorUtil;
-import com.log10x.ext.cloud.index.write.IndexWriteTarget;
-import com.log10x.ext.cloud.index.write.IndexWriteTarget.ByteRange;
-import com.log10x.ext.edge.bean.EvaluatorBean;
-import com.log10x.ext.edge.invoke.PipelineLaunchRequest;
-import com.log10x.ext.edge.json.MapperUtil;
-
-import io.netty.util.collection.LongObjectHashMap;
-import io.netty.util.collection.LongObjectMap;
+import com.log10x.ext.cloud.index.write.TargetObjectByteRangeIndex;
+import com.log10x.ext.cloud.index.write.TargetObjectByteRangeIndex.TimestampByteRange;
 
 /**
  * This class is used to produce a set of requests to a remote end-point 
  * to fetch a target set of input objects byte ranges residing
  * within a KV storage and scan them for events falling within 
  * a specific time range and matching a set of search terms.
- * To learn more about how this class is instantiated by a host l1x pipeline, see: 
- * {@link https://github.com/l1x-co/config/blob/main/pipelines/run/modules/input/index/query/stream.yaml }
+ * To learn more about how this class is instantiated by a host 10x pipeline, see: 
+ * {@link https://github.com/log-10x/modules/blob/main/pipelines/run/modules/input/objectStorage/query/stream.yaml# }
  */
 public class IndexQueryWriter extends BaseIndexWriter {
 	
@@ -55,32 +57,25 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 	private static final Logger logger = LogManager.getLogger(IndexQueryWriter.class);
 	
-	private static final String STREAM_SUFFIX = "-stream";
-	
-	private static PipelineLaunchRequest streamRequest(String name) {
-		
-		return PipelineLaunchRequest.newBuilder()
-				.withLaunchArg(PipelineLaunchRequest.RUNTIME_NAME_ARG, name)
-				.withIncludes("modules/input/objectStorage/query/object", "modules/input/objectStorage")
+	// Subquery is a wrapper config, not an actual app on it's own
+	private static final PipelineLaunchRequest SUBQUERY =
+			PipelineLaunchRequest.newBuilder()
+				.withBootstrapArg(PipelineLaunchOptions.RUN_TIME_NAME, "myObjectStorageSubQuery")
+				.withIncludes("cloud/streamer/subquery", "gitops")
 				.build();
-	}
 	
-	private static final String SUB_QUERY_SUFFIX = "-subq";
+	// Stream is an app where the user can tweak the config
+	private static final PipelineLaunchRequest STREAM =
+			PipelineLaunchRequest.newBuilder().withTenX("@/apps/cloud/streamer/stream").build();
 	
-	private static PipelineLaunchRequest queryRequest(String name) {
-		
-		return PipelineLaunchRequest.newBuilder()
-				.withLaunchArg(PipelineLaunchRequest.RUNTIME_NAME_ARG, name)
-				.withIncludes("modules/input/objectStorage/query", "modules/input/objectStorage")
-				.build();
-	}
-
-	protected static class ByteRangeComparator implements Comparator<ByteRange> {
+	private static final String VAR_SEPERATOR = ",";
+	
+	protected static class ByteRangeComparator implements Comparator<TimestampByteRange> {
 		
 		protected static final ByteRangeComparator INSTANCE = new ByteRangeComparator();
 		
 		@Override
-		public int compare(ByteRange o1, ByteRange o2) {
+		public int compare(TimestampByteRange o1, TimestampByteRange o2) {
 			
 			long off1 = o1.offset;
 			long off2 = o2.offset;
@@ -96,21 +91,6 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		}
 	}
 
-	protected static class IndexQueryEvent {
-
-		public String templateHash;
-		
-		public Object[] var;
-		
-		@Override
-		public String toString() {
-			
-			return 
-				"templateHash: " + templateHash + 
-				" var: " + ((var != null) ? Arrays.asList(var) : null);
-		}
-	}
-		
 	protected class IterateIndexObjectsTask implements Runnable {
 
 		protected final long toEpoch;
@@ -124,23 +104,26 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		
 		@Override
 		public void run() {
-			
+
 			String threadName = Thread.currentThread().getName();
-			
+
 			try {
-				
-				Thread.currentThread().setName(this.getClass().getSimpleName() + 
+
+				Thread.currentThread().setName(this.getClass().getSimpleName() +
 					" toEpoch: " + this.toEpoch + " " +
 					" -> " + indexObjectKeys.size());
-				
-				iterateIndexObjects(this.toEpoch, this.indexObjectKeys);	
-				
+
+				iterateIndexObjects(this.toEpoch, this.indexObjectKeys);
+
 			} catch (Exception e) {
-				
+
 				logger.error("error iterating index objects: " + this, e);
-				
+				logQuery(QueryLogLevel.ERROR,
+						String.format("scan error: failed iterating index objects (%s): %s",
+						this, e.getMessage()));
+
 			} finally {
-				
+
 				Thread.currentThread().setName(threadName);
 			}
 		}
@@ -169,25 +152,27 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		
 		@Override
 		public void run() {
-			
+
 			String threadName = Thread.currentThread().getName();
-			
+
 			try {
-				
-				Thread.currentThread().setName(this.getClass().getSimpleName() + 
+
+				Thread.currentThread().setName(this.getClass().getSimpleName() +
 					" interval: " + this.interval + " " +
 					this.fromEpoch  + " -> " + this.toEpoch);
-				
+
 				scanIndexRange(this.fromEpoch, this.toEpoch);
-				
-				latch.countDown();
-				
+
 			} catch (Exception e) {
-				
+
 				logger.error("error scanning index range: " + this, e);
-				
+				logQuery(QueryLogLevel.ERROR,
+						String.format("scan error: failed scanning index range (%s): %s",
+						this, e.getMessage()));
+
 			} finally {
-				
+
+				latch.countDown();
 				Thread.currentThread().setName(threadName);
 			}
 		}	
@@ -204,93 +189,142 @@ public class IndexQueryWriter extends BaseIndexWriter {
 	
 	private final Set<String> templateHashes;
 	
-	private final Set<String> vars;
+	private final List<List<String>> vars;
 	
+	private final String queryId;
+	
+	private final long queryElapseTime;
+	
+	private long lastQueryProcessingCheck;
+
 	private final IndexQueryClient scanFunctionClient;
 	
 	private final IndexQueryClient streamFunctionClient;
 	
-	private final PipelineLaunchRequest launchRequest;
-	
 	private final long timeslice;
 	
-	private final String basePipelineName;
-	
-	private final long flushInterval;
-	
-	private final long byteRange;
-
-	private final LongObjectMap<IndexWriteTarget> writeTargets;
+	private final String basePipelineUuid;
+		
+	private final Map<String, TargetObjectByteRangeIndex> blobByteRangeIndexMap;
 	private final Set<String> submittedKeyHashes;
 	private final Object keyHashesLock;
-	private final AtomicInteger subStreams;
+	
+	private final TokenSplitter tokenSplitter;
 	
 	private ExecutorService executorService;
 	private CountDownLatch latch;
 	
 	private volatile boolean closed;
 
+	private long queryStartTime;
+
+	private boolean shouldLog(QueryLogLevel level) {
+		IndexQueryOptions opts = (IndexQueryOptions) this.options;
+		List<String> levels = opts.queryLogLevels();
+		if (levels == null || levels.isEmpty()) {
+			return level != QueryLogLevel.DEBUG;
+		}
+		return levels.contains(level.name());
+	}
+
+	private void logQuery(QueryLogLevel level, String message) {
+		if (!shouldLog(level)) return;
+		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, null);
+	}
+
+	private void logQuery(QueryLogLevel level, String message, Map<String, Object> metadata) {
+		if (!shouldLog(level)) return;
+		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, metadata);
+	}
+
 	/**
-	 * this constructor is invoked by the l1x run-time.
+	 * this constructor is invoked by the 10x run-time.
 	 * 
 	 * @param 	args
-	 * 			a map of arguments passed to the l1x cli for the
+	 * 			a map of arguments passed to the 10x cli for the
 	 *  		target output for which this stream is instantiated
 	 * 			containing user configuration of this query
 	 * 
 	 * @param 	evaluatorBean
-	 * 			a reference to an l1x evaluator bean which allows this output
-	 * 			to interact with the l1x run-time
+	 * 			a reference to an 10x evaluator bean which allows this output
+	 * 			to interact with the 10x run-time
 	 */
 	public IndexQueryWriter(Map<String, Object> args, EvaluatorBean evaluatorBean) 
-		throws JsonMappingException, JsonProcessingException, IllegalArgumentException{
+		throws IllegalArgumentException{
 			
-		this(MapperUtil.jsonMapper.convertValue(args,
+		this(MapperUtil.jsonMapper(evaluatorBean).convertValue(args,
 			IndexQueryOptions.class), null, evaluatorBean);
 	}
 
 	public IndexQueryWriter(IndexQueryOptions options, 
-		ObjectStorageIndexAccessor indexAccessor, EvaluatorBean evaluatorBean) 
-			throws JsonMappingException, JsonProcessingException {
+		ObjectStorageIndexAccessor indexAccessor, EvaluatorBean evaluatorBean) {
 
 		super(options, indexAccessor, evaluatorBean);
-		
+
 		validateOptions(options);
-		
+
 		this.currInputValue = new IndexQueryEvent();
-		
+
 		this.templateHashes = new HashSet<String>(options.queryFilterTemplateHashes);
-		this.vars = new HashSet<String>(options.queryFilterVars);
+
+		logger.warn("[TRACE-Q] IndexQueryWriter INIT: querySearch={}, queryFilterVars.size={}, queryFilterTemplateHashes.size={}, queryId={}",
+			options.querySearch,
+			options.queryFilterVars != null ? options.queryFilterVars.size() : "null",
+			options.queryFilterTemplateHashes != null ? options.queryFilterTemplateHashes.size() : "null",
+			options.queryId != null ? options.queryId : "null");
 		
-		this.scanFunctionClient = new IndexQueryClient(this.indexAccessor, options.queryScanFunctionUrl);	
+		this.vars = new ArrayList<>(options.queryFilterVars.size());
+		
+		for (String queryFilterVar : options.queryFilterVars) {
+			vars.add(Arrays.asList(queryFilterVar.split(VAR_SEPERATOR)));
+		}
+				
+		this.queryId = (options.queryId != null && !options.queryId.isBlank()) ?
+			options.queryId :
+			UUID.randomUUID().toString();
+		
+		if (options.queryLimitProcessingTime != 0) {
+		
+			this.queryElapseTime =  (options.queryElapseTime != 0) ?
+				options.queryElapseTime :
+				System.currentTimeMillis() + options.queryLimitProcessingTime;
+			
+		} else {
+			
+			this.queryElapseTime = 0;
+		}
+
+		this.scanFunctionClient = new IndexQueryClient(this.indexAccessor, options.queryScanFunctionUrl, evaluatorBean);	
 		
 		this.streamFunctionClient = options.queryScanFunctionUrl.equals(options.queryStreamFunctionUrl) ?
 			this.scanFunctionClient :
-			new IndexQueryClient(this.indexAccessor, options.queryStreamFunctionUrl);
-	
-		this.flushInterval = this.parse("parseDuration", options.queryScanFlushInterval);
-		this.byteRange = this.parse("parseBytes", options.queryStreamFunctionParallelByteRange);
-		
-		this.launchRequest = launchRequest(options.queryActions);
+			new IndexQueryClient(this.indexAccessor, options.queryStreamFunctionUrl, evaluatorBean);
 		
 		this.timeslice = calcTimeSlice(options);
 		
-		this.basePipelineName = (String)this.evaluator().env(PipelineLaunchRequest.RUNTIME_NAME_ARG);
+		this.basePipelineUuid = (String)this.evaluator().env(PipelineLaunchOptions.UNIQUE_ID);
 		
-		this.writeTargets = new LongObjectHashMap<>();
+		this.blobByteRangeIndexMap = new HashMap<>();
 		this.submittedKeyHashes = new HashSet<>();
 		this.keyHashesLock = new Object();
-		this.subStreams = new AtomicInteger();
+		
+		this.tokenSplitter = TokenSplitter.create(evaluatorBean);
 	}
 	
 	private static void validateOptions(IndexQueryOptions options) {
 
-		long timerange = options.queryFilterTo - options.queryFilterFrom;
+		if ((options.querySearch != null) &&
+			(options.querySearch.isBlank())) {
+			
+			throw new IllegalArgumentException("search cannot be blank");
+		}
+		
+		long timerange = options.queryTo - options.queryFrom;
 		
 		if (timerange <= 0) {
 			
-			throw new IllegalArgumentException("illegal timerange, from: " + 
-				options.queryFilterFrom + ", to: " + options.queryFilterTo);
+			throw new IllegalArgumentException("illegal time range, 'from': " + 
+				options.queryFrom + " cannt be greater than 'to': " + options.queryTo);
 		}
 		
 		int maxFunctionInstances = options.queryScanFunctionParallelMaxInstances;
@@ -301,7 +335,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 		} else if (maxFunctionInstances > IndexQueryOptions.MAX_FUNCTION_INSTANCES_CAP) {
 
-			throw new IllegalArgumentException("max instances can't be over "
+			throw new IllegalArgumentException("max instances can't be over: "
 					+ IndexQueryOptions.MAX_FUNCTION_INSTANCES_CAP + ". value:" + maxFunctionInstances);
 		}
 		
@@ -312,9 +346,9 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		}
 	}
 
-	private long calcTimeSlice(IndexQueryOptions options) {
+	private static long calcTimeSlice(IndexQueryOptions options) {
 		
-		long baseTimeSlice = this.parse("parseDuration", options.queryScanFunctionParallelTimeslice);
+		long baseTimeSlice = options.queryScanFunctionParallelTimeslice;
 		
 		if (baseTimeSlice <= 0) {
 			return 0;
@@ -322,7 +356,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		
 		int maxFunctionInstances = options.queryScanFunctionParallelMaxInstances;
 		
-		long timerange = options.queryFilterTo - options.queryFilterFrom;
+		long timerange = options.queryTo - options.queryFrom;
 		
 		if (baseTimeSlice * maxFunctionInstances >= timerange) {
 			return baseTimeSlice;
@@ -333,24 +367,6 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		return timeSliceMultiplier * baseTimeSlice;
 	}
 	
-	private static PipelineLaunchRequest launchRequest(String pipelineArgs) 
-		throws JsonMappingException, JsonProcessingException {
-		
-		if ((pipelineArgs == null) || 
-			(pipelineArgs.isBlank())) {
-			
-			return null;
-		}
-		
-		String value = pipelineArgs.strip();
-		
-		ObjectMapper mapper = ((value.startsWith("{")) || (value.startsWith("["))) ?
-			MapperUtil.jsonMapper : 
-			yamlMapper;
-		
-		return mapper.readValue(value, PipelineLaunchRequest.class);
-	}
-	
 	@Override
 	public synchronized void flush() throws IOException {
 		
@@ -359,54 +375,147 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		}
 		
 		try {
-			
+
+			this.currInputValue.nullify();
+
 			MapperUtil.jsonMapper.
 				readerForUpdating(this.currInputValue).
 				readValue(this.currChars);
-	
-			if (currInputValue.templateHash != null) {			
-				
+
+			if (currInputValue.templateHash != null) {
+
 				templateHashes.add(currInputValue.templateHash);
-				
-			} else if (currInputValue.var != null) {
-				
-				for (Object var : currInputValue.var) {				
-					vars.add(String.valueOf(var));
-				}		
+				logger.warn("[TRACE-Q] flush: added templateHash={}, total templateHashes={}",
+					currInputValue.templateHash, templateHashes.size());
+
+			} else {
+
+				List<String> inputVars = new LinkedList<>();
+
+				if ((currInputValue.enrichmentValues != null) &&
+					(currInputValue.enrichmentValues.length > 0)) {
+
+					logger.warn("[TRACE-Q] flush: enrichmentValues.length={}, values={}",
+						currInputValue.enrichmentValues.length,
+						java.util.Arrays.toString(currInputValue.enrichmentValues));
+
+					for (String enrichmentValue : currInputValue.enrichmentValues) {
+
+						this.tokenSplitter.fill(enrichmentValue, inputVars);
+					}
+				} else if (currInputValue.vars != null) {
+
+					logger.warn("[TRACE-Q] flush: vars.length={}, values={}",
+						currInputValue.vars.length,
+						java.util.Arrays.toString(currInputValue.vars));
+
+					for (Object rawVar : currInputValue.vars) {
+
+						String stringVar = rawVar.toString();
+
+						inputVars.add(stringVar);
+					}
+				} else {
+					logger.warn("[TRACE-Q] flush: no templateHash, no enrichmentValues, no vars. raw={}",
+						this.currChars.builder.toString().substring(0, Math.min(200, this.currChars.builder.length())));
+				}
+
+				logger.warn("[TRACE-Q] flush: inputVars={}, vars.size after add={}",
+					inputVars, vars.size() + 1);
+				vars.add(inputVars);
 			}
-			
+
+		} catch (Exception e) {
+
+			logger.error("error flushing: " + this.currChars, e);
+			logQuery(QueryLogLevel.ERROR,
+					String.format("query error: failed parsing input event: %s", e.getMessage()));
+
 		} finally {
 			
 			super.flush();
 		}
 	}
+	
+	protected class IndexDecodedBloomFilter extends DecodedBloomFilter 
+		implements Function<Integer, Boolean> {
+
+		public IndexDecodedBloomFilter(String encodedFilter) {
+			super(encodedFilter);
+		}
+
+		@Override
+		public Boolean apply(Integer index) {
+
+			if (index >= vars.size()) {
+				logger.warn("[TRACE-Q] BloomFilter.apply: index {} >= vars.size {}. Returning false.", index, vars.size());
+				return false;
+			}
+
+			List<String> indexVars = vars.get(index);
+
+			for (String indexVar : indexVars) {
+
+				boolean found = this.test(indexVar);
+				if (!found) {
+					logger.warn("[TRACE-Q] BloomFilter.apply: index={}, var='{}' NOT in filter. Returning false. Total vars for index: {}",
+						index, indexVar, indexVars.size());
+					return false;
+				}
+			}
+
+			if (indexVars.isEmpty()) {
+				logger.warn("[TRACE-Q] BloomFilter.apply: index={}, vars list is EMPTY. Returning true (vacuous).", index);
+			}
+
+			return true;
+		}		
+	}
 		
 	private void iterateIndexObjects(long toEpoch,
-		Collection<String> indexObjectKeys) throws JsonProcessingException {
+		Collection<String> indexObjectKeys) throws IOException {
+		
+		IndexQueryOptions options = (IndexQueryOptions)this.options;
 		
 		Set<String> localLubmittedKeyHashes = new HashSet<>();
-		Map<String, Set<ByteRange>> output = new LinkedHashMap<>();
+		Map<String, Set<TimestampByteRange>> output = new LinkedHashMap<>();
 
-		String prefix = options.prefix();
-		
+		String prefix = options.target();
+
 		long lastSubmit = System.currentTimeMillis();
 		long lastEpoch = -1;
+
+		int scannedKeys = 0;
+		int skippedDuplicate = 0;
+		int skippedSearchFilter = 0;
+		int skippedTemplateHash = 0;
+		int matchedKeys = 0;
+		
+		QueryFilterEvaluator eval = (options.querySearch != null) ?
+			QueryFilterEvaluator.parse(options.querySearch) :
+			null;
 		
 		for (String indexObjectKey : indexObjectKeys) {
-		
+
 			try {
-				
-				IndexObjectKey key = IndexObjectKey.fromPath(indexAccessor, prefix, indexObjectKey, true);
-				
+
+				scannedKeys++;
+
+				IndexFilterKey key = IndexFilterKey.parseKey(this.indexAccessor,
+					prefix, indexObjectKey);
+
 				long epochValue = Long.valueOf(key.epoch);
-				
-				if (epochValue >= toEpoch) {		
+
+				if (epochValue >= toEpoch) {
+					logQuery(QueryLogLevel.DEBUG,
+						String.format("scan: epoch %d >= toEpoch %d, stopping iteration", epochValue, toEpoch));
 					break;
 				}
 				
 				String submitHash = String.valueOf(key.targetHash) + "_" + String.valueOf(key.byteRangeIndex);
 				
 				if (localLubmittedKeyHashes.contains(submitHash)) {
+					skippedDuplicate++;
 					continue;
 				}
 				
@@ -414,12 +523,12 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				// given epoch value, to prevent a case where multiple 'stream'
 				// functions stream the same timestamp.
 				//
-				if ((this.flushInterval > 0) &&
+				if ((options.queryScanFlushInterval > 0) &&
 					(epochValue != lastEpoch)) {
 					
 					long now = System.currentTimeMillis();
 					
-					if (now - lastSubmit > this.flushInterval) {
+					if (now - lastSubmit > options.queryScanFlushInterval) {
 						
 						this.submitMatchingByteRanges(output);
 						output.clear();
@@ -432,69 +541,102 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				
 				String encodedFilter = key.encodedFilter;
 				
-				DecodedBloomFilter filter = new DecodedBloomFilter(encodedFilter);
-				
-				if (!filter.testAll(this.vars)) {
+				IndexDecodedBloomFilter filter = new IndexDecodedBloomFilter(encodedFilter);
+
+				if ((eval != null) &&
+					(!eval.evaluate(filter))) {
+
+					skippedSearchFilter++;
+					if (scannedKeys <= 3) {
+						logger.warn("[TRACE-Q] iterateIndexObjects: SKIPPED by search filter. key={}, eval constants={}, vars.size={}",
+							indexObjectKey.substring(0, Math.min(80, indexObjectKey.length())),
+							eval.constants(), vars.size());
+					}
 					continue;
 				}
-				
-				if (!filter.testAny(this.templateHashes)) {
+
+				if ((!templateHashes.isEmpty()) &&
+					(!filter.testAny(this.templateHashes))) {
+
+					skippedTemplateHash++;
+					if (scannedKeys <= 3) {
+						logger.warn("[TRACE-Q] iterateIndexObjects: SKIPPED by templateHash filter. key={}, templateHashes={}",
+							indexObjectKey.substring(0, Math.min(80, indexObjectKey.length())),
+							templateHashes.size());
+					}
 					continue;
 				}
+
+				if (scannedKeys <= 3) {
+					logger.warn("[TRACE-Q] iterateIndexObjects: MATCHED key={}", indexObjectKey.substring(0, Math.min(80, indexObjectKey.length())));
+				}
 				
-				IndexWriteTarget indexWriteTarget;
+				TargetObjectByteRangeIndex blobByteRangeIndex;
 				
+				matchedKeys++;
 				localLubmittedKeyHashes.add(submitHash);
-				
+
 				synchronized (this.keyHashesLock) {
+					
 					if (!this.submittedKeyHashes.add(submitHash)) {
 						continue;
 					}
 					
-					indexWriteTarget = getWriteTarget(key);
+					blobByteRangeIndex = this.blobByteRangeIndex(key);
 				}
 				
-				if (indexWriteTarget == null) {
-					throw new IllegalStateException("Missing write target - " + key);
+				if (blobByteRangeIndex == null) {
+					throw new IllegalStateException("missing byte range index: " + key);
 				}
 				
-				Set<ByteRange> indexObjects = output.get(indexWriteTarget.target);
+				Set<TimestampByteRange> timestampByteRanges = output.get(blobByteRangeIndex.target);
 				
-				if (indexObjects == null) {
+				if (timestampByteRanges == null) {
 					
-					indexObjects = new HashSet<>();
-					output.put(indexWriteTarget.target, indexObjects);
+					timestampByteRanges = new HashSet<>();
+					output.put(blobByteRangeIndex.target, timestampByteRanges);
 				}
 				
-				ByteRange byteRange = indexWriteTarget.byteRanges.get(key.byteRangeIndex);
+				TimestampByteRange byteRange = blobByteRangeIndex.byteRanges.get(key.byteRangeIndex);
 				
-				indexObjects.add(byteRange);
+				timestampByteRanges.add(byteRange);
 			
 			} catch (Exception e) {
-				
-				logger.error("error testing: " + indexObjectKey, e);
+
+				logger.error("error testing filter: " + indexObjectKey, e);
+				logQuery(QueryLogLevel.ERROR,
+						String.format("scan error: failed processing index key %s: %s",
+						indexObjectKey, e.getMessage()));
 				continue;
 			}
 
 		}
 		
 		this.submitMatchingByteRanges(output);
+
+		logQuery(QueryLogLevel.DEBUG,
+			String.format("scan complete: scanned=%d, matched=%d, skippedDuplicate=%d, skippedSearch=%d, skippedTemplate=%d",
+				scannedKeys, matchedKeys, skippedDuplicate, skippedSearchFilter, skippedTemplateHash),
+			Map.of("scanned", scannedKeys, "matched", matchedKeys,
+				"skippedDuplicate", skippedDuplicate, "skippedSearch", skippedSearchFilter,
+				"skippedTemplate", skippedTemplateHash));
 	}
-	
-	private IndexWriteTarget getWriteTarget(IndexObjectKey key) throws IOException {
+
+	private TargetObjectByteRangeIndex blobByteRangeIndex(IndexFilterKey key) throws IOException {
 		
-		IndexWriteTarget result = this.writeTargets.get(key.targetHash);
+		TargetObjectByteRangeIndex result = blobByteRangeIndexMap.get(key.targetHash);
 		
 		if (result == null) {
-			String metaIndexPath = this.indexAccessor.metaIndexPath(options.prefix());
-			String indexName = String.valueOf(key.targetHash);
 			
-			String path = metaIndexPath + this.indexAccessor.keyPathSeperator() + indexName;
-			InputStream inputStream = this.indexAccessor.readObject(path);
+			String indexPath = indexAccessor.indexObjectPath(IndexObjectType.byteRange, options.target());
 			
-			result = MapperUtil.jsonMapper.readValue(inputStream, IndexWriteTarget.class);
+			String blobIndexPath = indexPath + indexAccessor.keyPathSeperator() + key.targetHash;
 			
-			this.writeTargets.put(key.targetHash, result);
+			InputStream inputStream = indexAccessor.readObject(blobIndexPath);
+			
+			result = MapperUtil.jsonMapper.readValue(inputStream, TargetObjectByteRangeIndex.class);
+			
+			blobByteRangeIndexMap.put(key.targetHash, result);
 			
 			inputStream.close();
 		}
@@ -504,11 +646,10 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 	private int scanIndexRange(long fromEpoch, long toEpoch) throws IOException {
 		
-		String prefix = options.prefix();		
+		String prefix = options.target();		
 		String searchAfter = String.valueOf(fromEpoch - 1);
 		
-		Iterator<List<String>> indexObjectIter = indexAccessor.iterateObjectKeys(
-			prefix, searchAfter);
+		Iterator<List<String>> indexObjectIter = indexAccessor.iterateObjectKeys(prefix, searchAfter, true);
 			
 		int submittedTasks = 0;
 		int submittedKeys = 0;
@@ -526,10 +667,9 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			for (endIndex = 0; endIndex < keys.size(); endIndex++) {
 				
 				String key = keys.get(endIndex);
-				
-				IndexObjectKey objectKey = IndexObjectKey.fromPath(indexAccessor, prefix, key, false);
-				
-				long epochValue = Long.valueOf(objectKey.epoch);
+								
+				long epochValue = IndexFilterKey.parseEpoch(this.indexAccessor,
+					prefix, key);
 				
 				if (epochValue >= toEpoch) {
 					break;
@@ -560,7 +700,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		return submittedKeys;
 	}
 	
-	private void submitMatchingByteRanges(Map<String, Set<ByteRange>> byteRanges) throws JsonProcessingException {
+	private void submitMatchingByteRanges(Map<String, Set<TimestampByteRange>> byteRanges) throws IOException {
 		
 		if ((byteRanges == null) ||
 			(byteRanges.isEmpty())) {
@@ -568,22 +708,128 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			return;
 		}
 		
-		QueryObjectsOptions mainRequest = createStreamRequest(byteRanges);
+		QueryObjectsOptions mainRequest = this.createStreamRequest(byteRanges);
 
 		Collection<QueryObjectsOptions> requests = this.splitStreamRequest(mainRequest);
-	
+
 		if (logger.isDebugEnabled()) {
-			
+
 			logger.debug("stream requests: " +
 				MapperUtil.jsonMapper.writeValueAsString(requests));
 		}
-		
-		for (QueryObjectsOptions request : requests) {
-			
-			String subStreamName = this.basePipelineName + STREAM_SUFFIX + "-" + this.subStreams.getAndIncrement();
-			
-			streamFunctionClient.send(request, this.launchRequest, streamRequest(subStreamName));
+
+		int totalObjects = 0;
+		for (QueryObjectsOptions req : requests) {
+			totalObjects += req.queryObject.size();
 		}
+
+		logQuery(QueryLogLevel.PERF,
+				String.format("stream dispatch: %d requests, %d objects, %d target blobs",
+				requests.size(), totalObjects, byteRanges.size()),
+				Map.of("requests", requests.size(), "objects", totalObjects, "blobs", byteRanges.size()));
+
+		for (QueryObjectsOptions request : requests) {
+
+			if (this.queryElapsed(true)) {
+				break;
+			}
+
+			PipelineLaunchRequest streamRequest = PipelineLaunchRequest.newBuilder()
+					.withBootstrapArg(PipelineLaunchOptions.PARENT_ID, this.basePipelineUuid)
+					.build();
+
+			streamFunctionClient.send(streamRequest, request, STREAM);
+		}
+	}
+	
+	private boolean queryElapsed(boolean checkResultLimit) throws IOException {
+			
+		IndexQueryOptions options = (IndexQueryOptions)this.options;
+
+		long now = System.currentTimeMillis();
+		
+		if ((this.queryElapseTime != 0) &&
+			(now > this.queryElapseTime)) {
+
+			logger.info("aborting query {}: processing time limit exceeded", this.queryId);
+
+			logQuery(QueryLogLevel.ERROR,
+					String.format("query aborted: processing time limit exceeded (limit=%dms)",
+					options.queryLimitProcessingTime));
+
+			return true;
+		}
+		
+		if (!checkResultLimit) {
+			return false;
+		}
+		
+		if (options.queryLimitResultSize == 0) {
+			return false;
+		}
+		
+		if (this.lastQueryProcessingCheck == 0) {
+			
+			this.lastQueryProcessingCheck = now;
+			return false;
+		}
+			
+		if (now - this.lastQueryProcessingCheck < options.queryScanFunctionLimitResultSizeInterval) {
+			return false;
+		}
+		
+		String basePath = indexAccessor.indexObjectPath(IndexObjectType.query, this.options.target());
+		
+		String queryPath = (new StringBuilder(basePath))
+				.append(indexAccessor.keyPathSeperator())
+				.append(this.queryId)
+				.toString();
+		
+		Iterator<List<String>> iter = indexAccessor.iterateObjectKeys(queryPath, null, true);
+		
+		long currSize = 0;
+		
+		while (iter.hasNext()) {
+			
+			List<String> keys = iter.next();
+			
+			for (String key : keys) {
+				
+				String expandedKey = indexAccessor.expandIndexObjectKey(key);
+				
+				int lastPathIndex = expandedKey.lastIndexOf(indexAccessor.keyPathSeperator());
+				
+				if ((lastPathIndex == -1) || (lastPathIndex == expandedKey.length() - 1)) {
+					continue;
+				}
+				
+				String utfSizeValue = expandedKey.substring(lastPathIndex + 1);
+				
+				long utfSize = Long.parseLong(utfSizeValue);
+				
+				currSize += utfSize;
+				
+				if (currSize >= options.queryLimitResultSize) {
+
+					logger.info("aborting query {}: result size limit exceeded ({} >= {})",
+							this.queryId, currSize, options.queryLimitResultSize);
+
+					logQuery(QueryLogLevel.ERROR,
+							String.format("query aborted: result size limit exceeded (%d bytes >= %d bytes limit)",
+							currSize, options.queryLimitResultSize),
+							Map.of("currentBytes", currSize, "limitBytes", options.queryLimitResultSize));
+
+					return true;
+				}
+				
+			}
+			
+			this.lastQueryProcessingCheck = System.currentTimeMillis();
+			
+			return false;
+		}
+		 
+		return false;	
 	}
 
 	@Override
@@ -618,18 +864,44 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			if (this.streamFunctionClient != this.scanFunctionClient) {
 				this.streamFunctionClient.close();
 			}
-			
+
+			if (this.queryStartTime != 0) {
+				long elapsed = System.currentTimeMillis() - this.queryStartTime;
+				logQuery(QueryLogLevel.PERF,
+						String.format("query complete: elapsed=%dms", elapsed),
+						Map.of("elapsedMs", elapsed));
+			}
+
 			this.closed = true;
 		}
-		
+
 		super.close();
 	}
-	
+
+	private boolean isEmptyQuery() {
+
+		if (!this.templateHashes.isEmpty()) {
+			logger.warn("[TRACE-Q] isEmptyQuery: templateHashes non-empty (size={}), returning false", templateHashes.size());
+			return false;
+		}
+
+		for (List<String> current : this.vars) {
+
+			if (!current.isEmpty()) {
+				logger.warn("[TRACE-Q] isEmptyQuery: found non-empty vars entry (size={}), returning false. vars total={}", current.size(), vars.size());
+				return false;
+			}
+		}
+
+		logger.warn("[TRACE-Q] isEmptyQuery: returning TRUE — templateHashes.size={}, vars.size={}", templateHashes.size(), vars.size());
+		return true;
+	}
+
 	private void submitQuery() {
 
-		if (templateHashes.isEmpty()) {
-
-			logger.warn("no matching template hashes to process");
+		if (isEmptyQuery()) {
+			logger.warn("No matching template hashes or vars, not submitting empty query");
+			logQuery(QueryLogLevel.DEBUG, "query empty: no matching template hashes or vars");
 			return;
 		}
 
@@ -640,9 +912,18 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 		IndexQueryOptions options = (IndexQueryOptions) this.options;
 
-		try {
+		this.queryStartTime = System.currentTimeMillis();
 
-			long queryRange = options.queryFilterTo - options.queryFilterFrom;
+		long queryRange = options.queryTo - options.queryFrom;
+
+		logQuery(QueryLogLevel.INFO,
+				String.format("query started: name=%s, search=%s, target=%s, range=[%d,%d] (%dms), " +
+				"processingTimeLimit=%dms, resultSizeLimit=%d",
+				options.queryName, options.querySearch, options.queryTarget,
+				options.queryFrom, options.queryTo, queryRange,
+				options.queryLimitProcessingTime, options.queryLimitResultSize));
+
+		try {
 
 			if ((this.timeslice != 0) &&
 				(this.timeslice < queryRange)) {
@@ -661,60 +942,83 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		} catch (Exception e) {
 
 			logger.error("error processing: " + this, e);
+			logQuery(QueryLogLevel.ERROR, "query error: " + e.getMessage());
 		}
 	}
 	
-	protected void submitToEndpoint() {
+	protected void submitToEndpoint() throws IOException {
 		
 		IndexQueryOptions options = (IndexQueryOptions)this.options;
 
-		long currFrom = options.queryFilterFrom;
-		long currTo = options.queryFilterFrom + this.timeslice;
+		long currFrom = options.queryFrom;
+		long currTo = options.queryFrom + this.timeslice;
 		
 		int index = 0;
 		
+		List<String> requestVars = new ArrayList<>(this.vars.size());
+		
+		for (List<String> varsArray : this.vars) {
+			requestVars.add(String.join(VAR_SEPERATOR, varsArray));		
+		}
+		
 		IndexQueryOptions baseScanRequest = new IndexQueryOptions(
+				options.queryName,
 				options.queryObjectStorageName,
 				options.queryObjectStorageArgs,
-				options.queryIndexContainer, 
+				options.queryIndexContainer,
 				options.queryReadContainer,
 				options.queryReadPrintProgress,
-				options.queryFilterTerms, 
-				new ArrayList<>(this.templateHashes), 
-				new ArrayList<>(this.vars),
-				options.queryFilterPrefix,
+				options.querySearch,
+				options.queryFilters,
+				new ArrayList<>(this.templateHashes),
+				requestVars,
+				this.queryId, options.queryLimitResultSize, this.queryElapseTime,
+				options.queryLimitProcessingTime, options.queryScanFunctionLimitResultSizeInterval,
+				options.queryTarget,
 				currFrom,
 				currTo,
 				options.queryScanFlushInterval,
-				options.queryScanFunctionUrl, 
-				null,
+				options.queryScanFunctionUrl,
+				0,
 				options.queryScanFunctionParallelMaxInstances,
 				options.queryScanFunctionParallelThreads,
 				options.queryStreamFunctionParallelObjects,
 				options.queryStreamFunctionParallelByteRange,
-				options.queryActions,
-				options.queryStreamFunctionUrl);
+				options.queryStreamFunctionUrl,
+				options.queryLogLevels,
+				options.queryLogGroup,
+				options.queryWriteResults);
 		
 		do {
 
+			if (this.queryElapsed(false)) {
+				break;
+			}
+			
 			TimeSlice timeSliceOverrides = new TimeSlice(currFrom, currTo);
 
-			String subQueryName = this.basePipelineName + SUB_QUERY_SUFFIX + "-" + index;
+			PipelineLaunchRequest scanRequest = PipelineLaunchRequest.newBuilder()
+					.withBootstrapArg(PipelineLaunchOptions.PARENT_ID, this.basePipelineUuid)
+					.build();
 			
-			scanFunctionClient.send(baseScanRequest, timeSliceOverrides, queryRequest(subQueryName));
+			scanFunctionClient.send(scanRequest, baseScanRequest, SUBQUERY, timeSliceOverrides);
 
 			currFrom = currTo;
 			currTo += this.timeslice;
 			
 			index++;
 
-		} while (currFrom < options.queryFilterTo);
+		} while (currFrom < options.queryTo);
 
 		if (logger.isDebugEnabled()) {
 			logger.debug("tasks submitted to remote endpoint: " + index);
 		}
+
+		logQuery(QueryLogLevel.INFO,
+				String.format("scan dispatched: %d remote scan tasks",
+				index));
 	}
-	
+
 	protected void submitToExecutor() throws IOException {
 		
 		IndexQueryOptions options = (IndexQueryOptions)this.options;
@@ -737,16 +1041,16 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			
 			int submitted = 0;
 			
-			long timerange = options.queryFilterTo - options.queryFilterFrom;
+			long timerange = options.queryTo - options.queryFrom;
 			long taskTimeslice = (long)Math.ceil(timerange / (double)scanTasks);
 			
-			long taskFrom = options.queryFilterFrom;
+			long taskFrom = options.queryFrom;
 			
 			do {
 				
 				long taskTo = Math.min(
 					taskFrom + taskTimeslice, 
-					options.queryFilterTo
+					options.queryTo
 				);
 
 				executorService.submit(
@@ -755,7 +1059,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				taskFrom += taskTimeslice;
 				submitted++;
 				
-			} while (taskFrom < options.queryFilterTo);
+			} while (taskFrom < options.queryTo);
 			
 			int tasksDiff = scanTasks - submitted;
 			
@@ -764,17 +1068,24 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			}
 			
 			logger.debug("submitted index range tasks: " + submitted);
-		
+
+			logQuery(QueryLogLevel.INFO,
+					String.format("scan dispatched: %d local scan tasks, threads=%d", submitted, threadPoolSize));
+
 		} else {
-			
+
 			logger.debug("executing sync");
 
-			this.scanIndexRange(options.queryFilterFrom, options.queryFilterTo);
+			logQuery(QueryLogLevel.DEBUG, "scan dispatched: single-threaded local scan");
+
+			this.scanIndexRange(options.queryFrom, options.queryTo);
 		}
 	}
 	
-	private QueryObjectsOptions createStreamRequest(Map<String, Set<ByteRange>> indexObjects) {
+	private QueryObjectsOptions createStreamRequest(Map<String, Set<TimestampByteRange>> indexObjects) {
 		
+		IndexQueryOptions options = (IndexQueryOptions)this.options;
+
 		List<QueryObjectOptions> objectRequests = this.createObjectRequests(indexObjects);
 
 		int size = objectRequests.size();
@@ -793,8 +1104,8 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			long byteRangeSpan = endOffset - startOffset;
 			
 			if ((rangeSize > 1) &&
-				(this.byteRange != 0) &&
-				(byteRangeSpan > this.byteRange)) {
+				(options.queryStreamFunctionParallelByteRange != 0) &&
+				(byteRangeSpan > options.queryStreamFunctionParallelByteRange)) {
 				
 				this.splitObjectRequest(request, expanded);
 				
@@ -809,6 +1120,8 @@ public class IndexQueryWriter extends BaseIndexWriter {
 	
 	private void splitObjectRequest(QueryObjectOptions request, List<QueryObjectOptions> output) {
 
+		IndexQueryOptions options = (IndexQueryOptions)this.options;
+
 		long requestStartPos = request.offset(0);
 		int firstRequestIndex = 0;
 
@@ -819,7 +1132,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			long currentEndPos = request.offset(i) + request.length(i);
 			long currentLength = currentEndPos - requestStartPos;
 
-			if (currentLength > this.byteRange) {
+			if (currentLength > options.queryStreamFunctionParallelByteRange) {
 
 				QueryObjectOptions subOptions = request.subOptions(firstRequestIndex, i);
 				
@@ -835,38 +1148,173 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		output.add(subOptions);
 	}
  	
+	/**
+	 * SQS maximum message size is 256KB (262,144 bytes).
+	 * We use a safety margin to account for message overhead and encoding.
+	 */
+	private static final int SQS_MAX_MESSAGE_SIZE_BYTES = 150_000;
+
+	/**
+	 * Splits a stream request into multiple smaller requests to stay within SQS message size limits.
+	 *
+	 * First splits by object count (queryStreamFunctionParallelObjects), then checks each
+	 * resulting message against the SQS size limit and re-splits if necessary.
+	 */
 	private Collection<QueryObjectsOptions> splitStreamRequest(
 		QueryObjectsOptions request) {
-		
+
 		IndexQueryOptions options = (IndexQueryOptions)this.options;
-				
+
+		// First pass: split by object count if configured
+		Collection<QueryObjectsOptions> countSplitResults;
+
 		if (options.queryStreamFunctionParallelObjects == 0) {
-			return Collections.singleton(request);
+			countSplitResults = Collections.singleton(request);
+		} else {
+			countSplitResults = splitByObjectCount(request, options.queryStreamFunctionParallelObjects);
 		}
-			
+
+		// Second pass: ensure each message is within SQS size limits
+		Collection<QueryObjectsOptions> result = new ArrayList<>();
+
+		for (QueryObjectsOptions countSplitRequest : countSplitResults) {
+			Collection<QueryObjectsOptions> sizeSplitResults = splitByMessageSize(countSplitRequest);
+			result.addAll(sizeSplitResults);
+		}
+
+		return result;
+	}
+
+	/**
+	 * Splits requests by object count.
+	 */
+	private static Collection<QueryObjectsOptions> splitByObjectCount(QueryObjectsOptions request, int maxObjects) {
+
 		int index = 0;
 		int size = request.queryObject.size();
-		
+
 		Collection<QueryObjectsOptions> result = new ArrayList<>();
-		
+
 		while (index < size) {
-			
+
 			int remaining = size - index;
-			int subListSize = Math.min(options.queryStreamFunctionParallelObjects, remaining);
-						
+			int subListSize = Math.min(maxObjects, remaining);
+
 			List<QueryObjectOptions> subList = request.queryObject.subList(index,
 				index + subListSize);
-			
+
 			QueryObjectsOptions subRequest = new QueryObjectsOptions();
-			
+
 			subRequest.queryObject.addAll(subList);
-			
+
 			index += subListSize;
-			
+
 			result.add(subRequest);
 		}
-		
+
 		return result;
+	}
+
+	/**
+	 * Splits a request into multiple requests if the JSON serialization exceeds SQS size limits.
+	 * Uses iterative size calculation: pre-computes each object's size once (O(n) serializations)
+	 * then uses arithmetic to determine batch sizes, avoiding O(n²) re-serialization.
+	 */
+	private static Collection<QueryObjectsOptions> splitByMessageSize(QueryObjectsOptions request) {
+
+		// Quick check: if the full message is within limits, return as-is
+		int fullSize = calculateJsonSize(request);
+
+		if (fullSize <= SQS_MAX_MESSAGE_SIZE_BYTES) {
+			return Collections.singleton(request);
+		}
+
+		if (logger.isInfoEnabled()) {
+			logger.info("Message size {} bytes exceeds limit {} bytes, splitting {} objects",
+				fullSize, SQS_MAX_MESSAGE_SIZE_BYTES, request.queryObject.size());
+		}
+
+		// Pre-calculate size of each individual object once (O(n) serializations)
+		int[] objectSizes = new int[request.queryObject.size()];
+		for (int i = 0; i < request.queryObject.size(); i++) {
+			objectSizes[i] = calculateObjectJsonSize(request.queryObject.get(i));
+		}
+
+		// Calculate base wrapper size: {"queryObject":[]}
+		int baseWrapperSize = calculateJsonSize(new QueryObjectsOptions());
+
+		Collection<QueryObjectsOptions> result = new ArrayList<>();
+		QueryObjectsOptions currentBatch = new QueryObjectsOptions();
+		int currentBatchSize = baseWrapperSize;
+
+		for (int i = 0; i < request.queryObject.size(); i++) {
+			QueryObjectOptions objectOption = request.queryObject.get(i);
+			int objectSize = objectSizes[i];
+
+			// Calculate projected size: current + comma (if not first in batch) + objectSize
+			int commaSize = currentBatch.queryObject.isEmpty() ? 0 : 1;
+			int projectedSize = currentBatchSize + commaSize + objectSize;
+
+			if (projectedSize > SQS_MAX_MESSAGE_SIZE_BYTES) {
+
+				// Current batch would exceed limit, finalize it (if non-empty) and start new batch
+				if (!currentBatch.queryObject.isEmpty()) {
+					result.add(currentBatch);
+					currentBatch = new QueryObjectsOptions();
+				}
+
+				// Add this object to the new batch
+				currentBatch.queryObject.add(objectOption);
+				currentBatchSize = baseWrapperSize + objectSize;
+
+				// If a single object exceeds the limit, log a warning but still include it
+				if (currentBatchSize > SQS_MAX_MESSAGE_SIZE_BYTES) {
+					logger.warn("Single object exceeds SQS size limit: {} bytes", currentBatchSize);
+				}
+
+			} else {
+				// Object fits, add it to current batch
+				currentBatch.queryObject.add(objectOption);
+				currentBatchSize = projectedSize;
+			}
+		}
+
+		// Add final batch if non-empty
+		if (!currentBatch.queryObject.isEmpty()) {
+			result.add(currentBatch);
+		}
+
+		if (logger.isInfoEnabled()) {
+			logger.info("Split message into {} parts", result.size());
+		}
+
+		return result;
+	}
+
+	/**
+	 * Calculates the JSON serialization size in bytes for a QueryObjectsOptions wrapper.
+	 */
+	private static int calculateJsonSize(QueryObjectsOptions request) {
+		try {
+			byte[] json = MapperUtil.jsonMapper.writeValueAsBytes(request);
+			return json.length;
+		} catch (JsonProcessingException e) {
+			logger.error("Failed to calculate JSON size", e);
+			return Integer.MAX_VALUE;
+		}
+	}
+
+	/**
+	 * Calculates the JSON serialization size in bytes for a single QueryObjectOptions.
+	 */
+	private static int calculateObjectJsonSize(QueryObjectOptions object) {
+		try {
+			byte[] json = MapperUtil.jsonMapper.writeValueAsBytes(object);
+			return json.length;
+		} catch (JsonProcessingException e) {
+			logger.error("Failed to calculate object JSON size", e);
+			return Integer.MAX_VALUE;
+		}
 	}
 	
 	private QueryObjectOptions createObjectRequest(String targetObject,
@@ -879,23 +1327,27 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		IndexQueryOptions queryOptions = (IndexQueryOptions)this.options;
 
 		return new QueryObjectOptions(
-			queryOptions.queryObjectStorageName, queryOptions.queryObjectStorageArgs,
-			queryOptions.queryFilterTerms, targetObject, queryOptions.queryReadContainer,
-			(filterTimestamps) ? queryOptions.queryFilterFrom : 0, 
-			(filterTimestamps) ? queryOptions.queryFilterTo : 0,
-			new long[byteRangeSize * 2]);
+				queryOptions.queryName, queryOptions.queryObjectStorageName,
+				queryOptions.queryObjectStorageArgs, queryOptions.filter(),
+				queryOptions.target(), targetObject,
+				queryOptions.queryReadContainer, queryOptions.queryIndexContainer,
+				(filterTimestamps) ? queryOptions.queryFrom : 0,
+				(filterTimestamps) ? queryOptions.queryTo : 0,
+				new long[byteRangeSize * 2], this.queryId, this.queryElapseTime,
+				queryOptions.queryLogLevels(), queryOptions.queryLogGroup,
+				queryOptions.queryWriteResults);
 	}
 	
-	private List<QueryObjectOptions> createObjectRequests(Map<String, Set<ByteRange>> targetObjects) {
+	private List<QueryObjectOptions> createObjectRequests(Map<String, Set<TimestampByteRange>> targetObjects) {
 		
 		List<QueryObjectOptions> result = new ArrayList<>();
 		
 		IndexQueryOptions queryOptions = (IndexQueryOptions)this.options;
 
-		for (Map.Entry<String, Set<ByteRange>> entry : targetObjects.entrySet()) {
+		for (Map.Entry<String, Set<TimestampByteRange>> entry : targetObjects.entrySet()) {
 					
 			String targetObject = entry.getKey();
-			Collection<ByteRange> targetByteRanges = new TreeSet<>(ByteRangeComparator.INSTANCE);
+			Collection<TimestampByteRange> targetByteRanges = new TreeSet<>(ByteRangeComparator.INSTANCE);
 			
 			targetByteRanges.addAll(entry.getValue());
 			
@@ -904,13 +1356,13 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			
 			boolean[] rangesInTimeframeStates = new boolean[targetByteRanges.size()];
 						
-			for (ByteRange byteRange : targetByteRanges) {
+			for (TimestampByteRange byteRange : targetByteRanges) {
 
 				long minTimestamp = byteRange.minTimestamp;
 				long maxTimestamp = byteRange.maxTimestamp;
 
-				if ((queryOptions.queryFilterFrom <= minTimestamp) &&
-					(queryOptions.queryFilterTo    > maxTimestamp)) {
+				if ((queryOptions.queryFrom <= minTimestamp) &&
+					(queryOptions.queryTo    > maxTimestamp)) {
 					
 					rangesInTimeframeStates[index] = true;
 					rangesInTimeframe++;
@@ -920,7 +1372,11 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			}
 						
 			int rangesOutsideTimeframe = targetByteRanges.size() - rangesInTimeframe;
-			
+
+			logQuery(QueryLogLevel.DEBUG,
+				String.format("timestamp split: object=%s, byteRanges=%d, inTimeframe=%d, outsideTimeframe=%d",
+					targetObject, targetByteRanges.size(), rangesInTimeframe, rangesOutsideTimeframe));
+
 			QueryObjectOptions insideTimeframeRequest = this.createObjectRequest(
 					targetObject, rangesInTimeframe, false);
 
@@ -929,7 +1385,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			
 			index = 0;
 			
-			for (ByteRange byteRange : targetByteRanges) {
+			for (TimestampByteRange byteRange : targetByteRanges) {
 
 				QueryObjectOptions request = rangesInTimeframeStates[index]
 						? insideTimeframeRequest
@@ -962,12 +1418,13 @@ public class IndexQueryWriter extends BaseIndexWriter {
 	}
 	
 	protected static class TimeSlice {
-		public final long queryFilterFrom;
-		public final long queryFilterTo;
+		
+		public final long queryFrom;
+		public final long queryTo;
 		
 		protected TimeSlice(long from, long to) {
-			this.queryFilterFrom = from;
-			this.queryFilterTo = to;
+			this.queryFrom = from;
+			this.queryTo = to;
 		}
 	}
 }

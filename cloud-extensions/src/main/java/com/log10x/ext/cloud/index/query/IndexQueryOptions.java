@@ -4,16 +4,18 @@ import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.log10x.ext.cloud.index.interfaces.IndexContainerOptions;
-import com.log10x.ext.cloud.index.interfaces.IndexQueryRequest;
+import com.log10x.api.eval.Evaluable;
+import com.log10x.api.util.MapperUtil;
+import com.log10x.ext.cloud.index.interfaces.options.IndexContainerOptions;
+import com.log10x.ext.cloud.index.interfaces.options.IndexQueryRequest;
 import com.log10x.ext.cloud.index.util.ArgsUtil;
-import com.log10x.ext.edge.json.MapperUtil;
 
 /**
  * A POJO for deserializing instances of the index object option group defined in:
- * {@link http://doc.log10x.com/run/input/objectStorage/query} 
+ * {@link https://doc.log10x.com/run/input/objectStorage/query} 
  */
 public class IndexQueryOptions implements IndexContainerOptions, IndexQueryRequest {
 	
@@ -21,66 +23,106 @@ public class IndexQueryOptions implements IndexContainerOptions, IndexQueryReque
 	
 	public static final int MAX_FUNCTION_INSTANCES_CAP = 10000;
 	
+	public final String queryName;
+	
 	public final String queryObjectStorageName;
 	
 	public final List<String> queryObjectStorageArgs;
 	
 	public final String queryIndexContainer;
 	
-	public final String queryFilterPrefix;
+	public final String queryTarget;
 	
 	public final String queryReadContainer;
 	
 	public final boolean queryReadPrintProgress;
 
-	public final List<String> queryFilterTerms;
+	public final String querySearch;
+	
+	public final List<String> queryFilters;
 	
 	public final List<String> queryFilterTemplateHashes;
 	
 	public final List<String> queryFilterVars;
-
-	public final long queryFilterFrom;
 	
-	public final long queryFilterTo;
+	public final String queryId;
+	
+	public final long queryElapseTime;
+	
+	@Evaluable
+	public final long queryLimitProcessingTime;
+	
+	@Evaluable
+	public final long queryLimitResultSize;
+
+	@Evaluable
+	public final long queryScanFunctionLimitResultSizeInterval;
+
+	@Evaluable
+	public final long queryFrom;
+	
+	@Evaluable
+	public final long queryTo;
 	
 	public final String queryScanFunctionUrl;
 	
-	public final String queryScanFunctionParallelTimeslice;
+	@Evaluable
+	public final int queryScanFunctionParallelTimeslice;
 	
 	public final int queryScanFunctionParallelMaxInstances;
 	
 	public final int queryScanFunctionParallelThreads;
 	
-	public final String queryScanFlushInterval;
+	public final int queryScanFlushInterval;
 	
-	public final String queryStreamFunctionParallelByteRange;
+	@Evaluable
+	public final int queryStreamFunctionParallelByteRange;
 	
 	public final int queryStreamFunctionParallelObjects;
 	
-	public final String queryActions;
-	
 	public final String queryStreamFunctionUrl;
 
-	public IndexQueryOptions(String queryAccess, List<String> queryObjectStorageArgs,
-		String queryIndexContainer, String queryReadContainer, boolean queryReadPrintProgress,
-		List<String> queryFilterTerms, List<String> queryTemplatesHashes, List<String> queryVars,
-		String queryFilterPrefix, long queryFilterFrom, long queryFilterTo,
-		String queryScanFlushInterval, String queryScanFunctionUrl, 
-		String queryScanFunctioTimeslice, int queryScanFunctionMaxInstances,
+	public final String queryLogLevels;
+
+	public final String queryLogGroup;
+
+	public final boolean queryWriteResults;
+
+	public IndexQueryOptions(String queryName, String queryAccess,
+		List<String> queryObjectStorageArgs, String queryIndexContainer,
+		String queryReadContainer, boolean queryReadPrintProgress,
+		String querySearch, List<String> queryFilters,
+		List<String> queryTemplatesHashes, List<String> queryVars,
+		String queryID, long queryMaxResultSize, long queryElapseTime,
+		long queryMaxProcessingTime, long queryProcessingCheckInterval,
+		String queryTarget, long queryFrom, long queryTo,
+		int queryScanFlushInterval, String queryScanFunctionUrl,
+		int queryScanFunctioTimeslice, int queryScanFunctionMaxInstances,
 		int queryScanFunctionThreads, int queryStreamFunctionObjects,
-		String queryStreamFunctionByteRange, String queryActions,
-		String queryStreamFunctionUrl) {
-		
+		int queryStreamFunctionByteRange, String queryStreamFunctionUrl,
+		String queryLogLevels, String queryLogGroup,
+		boolean queryWriteResults) {
+
+		this.queryName = queryName;
 		this.queryObjectStorageName = queryAccess;
 		this.queryObjectStorageArgs = queryObjectStorageArgs;
 		
-		this.queryFilterPrefix = queryFilterPrefix;
-		this.queryFilterTerms =  queryFilterTerms;
-		this.queryFilterFrom = queryFilterFrom;
-		this.queryFilterTo = queryFilterTo;
+		this.queryTarget = queryTarget;
+		this.queryFilters =  queryFilters;
+		this.querySearch = querySearch;
+		this.queryFrom = queryFrom;
+		this.queryTo = queryTo;
 		
 		this.queryFilterTemplateHashes = queryTemplatesHashes;
 		this.queryFilterVars = queryVars;
+		
+		this.queryId = queryID;
+		this.queryLimitResultSize = queryMaxResultSize;
+		
+		this.queryLimitProcessingTime = queryMaxProcessingTime;
+		this.queryScanFunctionLimitResultSizeInterval = queryProcessingCheckInterval;
+		
+		this.queryElapseTime = queryElapseTime;
 		
 		this.queryIndexContainer = queryIndexContainer;
 		this.queryScanFunctionParallelTimeslice = queryScanFunctioTimeslice;
@@ -93,28 +135,33 @@ public class IndexQueryOptions implements IndexContainerOptions, IndexQueryReque
 		this.queryReadPrintProgress = queryReadPrintProgress;
 		this.queryStreamFunctionParallelObjects = queryStreamFunctionObjects;
 		this.queryStreamFunctionParallelByteRange = queryStreamFunctionByteRange;
-		this.queryActions = queryActions;
 		this.queryStreamFunctionUrl = queryStreamFunctionUrl;
+
+		this.queryLogLevels = queryLogLevels;
+		this.queryLogGroup = queryLogGroup;
+
+		this.queryWriteResults = queryWriteResults;
 	}
-	
-	public IndexQueryOptions(IndexQueryOptions other) {
-		
-		this(other.queryObjectStorageName, other.queryObjectStorageArgs,
-			 other.queryIndexContainer, 
-			 other.queryReadContainer, other.queryReadPrintProgress, other.queryFilterTerms,
-			 other.queryFilterTemplateHashes, other.queryFilterVars,
-			 other.queryFilterPrefix, other.queryFilterFrom, other.queryFilterTo,
-			 other.queryScanFlushInterval, other.queryScanFunctionUrl,
-			 other.queryScanFunctionParallelTimeslice, other.queryScanFunctionParallelMaxInstances,
-			 other.queryScanFunctionParallelThreads, other.queryStreamFunctionParallelObjects,
-			 other.queryStreamFunctionParallelByteRange,
-			 other.queryActions, other.queryStreamFunctionUrl);			
-	}
-	
+
 	protected IndexQueryOptions() {
-		this(null, new ArrayList<>(), null, null, true, new LinkedList<>(),
-			new LinkedList<>(), new LinkedList<>(), null,
-			-1, -1, null, null, null, DEFAULT_MAX_FUNCTION_INSTANCES, 0, 0, null, null, null);
+		this(null, null, new ArrayList<>(), null, null, true, null, new LinkedList<>(),
+			new LinkedList<>(), new LinkedList<>(), null, 0, 0, 0, 0, null,
+			-1, -1, 0, null, 0, DEFAULT_MAX_FUNCTION_INSTANCES, 0, 0, 0, null, null, null,
+			false);
+	}
+	
+	@Override
+	public List<String> queryLogLevels() {
+
+		if (queryLogLevels == null || queryLogLevels.isBlank()) {
+			return List.of();
+		}
+		return List.of(queryLogLevels.split(","));
+	}
+
+	@Override
+	public String name() {
+		return this.queryName;
 	}
 	
 	@Override
@@ -123,8 +170,8 @@ public class IndexQueryOptions implements IndexContainerOptions, IndexQueryReque
 	}
 
 	@Override
-	public String prefix() {
-		return this.queryFilterPrefix;
+	public String target() {
+		return this.queryTarget;
 	}
 	
 	@Override
@@ -133,18 +180,36 @@ public class IndexQueryOptions implements IndexContainerOptions, IndexQueryReque
 	}
 
 	@Override
-	public List<String> terms() {
-		return this.queryFilterTerms;
+	public String filter() {
+		
+		String and = ' ' + QueryFilterEvaluator.AND + ' ';
+		String query = this.queryFilters.stream().collect(Collectors.joining(and));
+		
+		if ((this.querySearch != null) &&
+			(!this.querySearch.isBlank())) {
+			
+			if (query.isBlank()) {
+				query = this.querySearch;
+			} else {
+				query += and + this.querySearch;
+			}
+		}
+		
+		return query;
+	}
+
+	public boolean hasFilters() {
+		return !filter().isBlank();
 	}
 
 	@Override
 	public long from() {
-		return this.queryFilterFrom;
+		return this.queryFrom;
 	}
 
 	@Override
 	public long to() {
-		return this.queryFilterTo;
+		return this.queryTo;
 	}
 	
 	@Override
@@ -161,10 +226,24 @@ public class IndexQueryOptions implements IndexContainerOptions, IndexQueryReque
 	public String inputContainer() {
 		return null;
 	}
+
+	@Override
+	public String queryLogGroup() {
+		return this.queryLogGroup;
+	}
+
+	@Override
+	public String ID() {
+		return this.queryId;
+	}
+	
+	@Override
+	public long elapseTime() {
+		return this.queryElapseTime;
+	}
 	
 	@Override
 	public Map<String, String> args() {
-		
-		return ArgsUtil.toMap(queryObjectStorageArgs);
+		return ArgsUtil.toMap(this.queryObjectStorageArgs);
 	}
 }

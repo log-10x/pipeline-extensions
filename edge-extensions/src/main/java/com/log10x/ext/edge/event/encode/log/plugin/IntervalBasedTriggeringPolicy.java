@@ -13,7 +13,7 @@ import org.apache.logging.log4j.core.config.plugins.PluginBuilderFactory;
 
 /**
  * A log4j2 trigger policy plugin that rolls a file over based on intervals.
- * Used by: {@link https://github.com/l1x-co/config/blob/main/pipelines/run/modules/input/forwarder/filebeat/input/log4j2.yaml}
+ * Used by: {@link https://github.com/log-10x/config/blob/main/pipelines/run/modules/input/forwarder/filebeat/input/log4j2.yaml}
  */
 @Plugin(name = "IntervalBasedTriggeringPolicy", category = Core.CATEGORY_NAME, printObject = true)
 public final class IntervalBasedTriggeringPolicy extends AbstractTriggeringPolicy {

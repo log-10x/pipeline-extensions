@@ -28,12 +28,15 @@ public class AWSConsts {
 	public static final String S3_SERVICE = "s3";
 	public static final String AWS_HOST = "amazonaws.com";
 	
+	public static final String CODE = "Code";
+	public static final String MESSAGE = "Message";
 	public static final String LIST_KEY = "Key";
 	public static final String NEXT_CONT_TOKEN = "NextContinuationToken";
 	public static final String IS_TRUNC = "IsTruncated";
 	public static final String CONTENTS = "Contents";
 	public static final String LAST_MODIFIED = "LastModified";
-
+	public static final String NO_SUCH_KEY = "NoSuchKey";
+	
 	public static final String LIST_TYPE_PARAM = "list-type";
 	public static final String LIST_TYPE_PARAM_VAL = "2";
 	public static final String PREFIX_PARAM = "prefix";

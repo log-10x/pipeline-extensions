@@ -5,6 +5,8 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
 
+import com.log10x.ext.edge.util.StringBuilderReader;
+
 /**
  * Utility base class for processing lines read from stream. Descendants
  * can use this to decorate and filter lines.

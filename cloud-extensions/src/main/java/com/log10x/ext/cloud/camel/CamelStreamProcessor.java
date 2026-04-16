@@ -10,7 +10,7 @@ import org.apache.logging.log4j.Logger;
 /**
  * Base class for Apache Camel route processors.
  * 
- * @param <T> the OutputStream type used to bind the route to its l1x pipeline input
+ * @param <T> the OutputStream type used to bind the route to its 10x pipeline input
  */
 public abstract class CamelStreamProcessor<T extends OutputStream> extends BaseRouteProcessor {
 

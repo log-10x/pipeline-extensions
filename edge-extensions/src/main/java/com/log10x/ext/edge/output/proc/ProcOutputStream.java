@@ -2,43 +2,42 @@ package com.log10x.ext.edge.output.proc;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.Map;
-import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
-import com.log10x.ext.edge.bean.EvaluatorBean;
-import com.log10x.ext.edge.json.MapperUtil;
-import com.log10x.ext.edge.output.proc.ProcOutputStreamOptions.ProcDestroyMode;
+import com.log10x.api.eval.EvaluatorBean;
+import com.log10x.api.util.MapperUtil;
+import com.log10x.ext.edge.output.proc.ProcStreamOptions.ProcDestroyMode;
 
 /**
- * A output stream for wiring l1x Object values into the stdin pipe
+ * A output stream for wiring tenxObject values into the stdin pipe
  * of a spawned sub-process. This is commonly used to write event
  * data into a forwarder process such as Fluentd, FileBeat, Fluent Bit.. .. 
  * 
  * It allows for caching of the spawned sub-process across multiple 
- * executions of host l1x pipeline with a host JVM.
+ * executions of host 10x pipeline with a host JVM.
  * 
- * For an example of how this class is used to connect the host l1x pipeline
- * to a Fluent Bit forwarder, see: {@link https://github.com/l1x-co/config/blob/main/pipelines/run/config/output/event/process/fluentbit.yaml}
+ * For an example of how this class is used to connect the host 10x pipeline
+ * to a Fluent Bit forwarder, see: {@link https://github.com/log-10x/config/blob/main/pipelines/run/config/output/event/process/config.yaml}
  * 
 **/
 public class ProcOutputStream extends OutputStream {
 			
-	private final ProcOutputStreamOptions options;
+	protected static final long MAX_STARTUP_WAIT_MS = TimeUnit.SECONDS.toMillis(10);
+	
+	private final ProcStreamOptions options;
 	
 	private ProcOutputStreamImpl impl;
 	
 	/**
-	 * this constructor is invoked by the l1x run-time.
+	 * this constructor is invoked by the 10x run-time.
 	 * 
 	 * @param 	args
-	 * 			a map arguments of arguments passed to the l1x cli for the
+	 * 			a map arguments of arguments passed to the 10x cli for the
 	 * `		target output for which this stream is instantiated
 	 * 
 	 * @param 	evaluatorBean
-	 * 			a reference to an l1x evaluator bean which allows this output
+	 * 			a reference to an 10x evaluator bean which allows this output
 	 */
 	public ProcOutputStream(Map<String, Object> args, EvaluatorBean evaluatorBean) {
 		
@@ -46,22 +45,39 @@ public class ProcOutputStream extends OutputStream {
 			ProcOutputStreamOptions.class), evaluatorBean);
 	}
 	
-	public ProcOutputStream(ProcOutputStreamOptions options, EvaluatorBean evaluatorBean) {
+	public ProcOutputStream(ProcStreamOptions options, EvaluatorBean evaluatorBean) {
 		
-		if ((options.procOutDestroyMode == ProcDestroyMode.CACHED) &&
-			(options.procOutMaxCacheSize <= 0)) {
+		validateOptions(options);
+		
+		this.options = options;
+
+		if (options.destroyMode() == ProcDestroyMode.CACHED) {
+
+			this.impl = ProcOutputCache.Instance.get(options, evaluatorBean);
+		} else {
+			this.impl = ProcOutputStreamImpl.newImpl(options, evaluatorBean);
+		}
+	}
+	
+	protected void validateOptions(ProcStreamOptions options) {
+		
+		if ((options.destroyMode() == ProcDestroyMode.CACHED) &&
+			(options.maxCacheSize() <= 0)) {
 			
 			throw new IllegalArgumentException("Must have positive cache size in cached mode - " + options);
 		}
 
-		this.options = options;
-
-		if (options.procOutDestroyMode == ProcDestroyMode.CACHED) {
-
-			this.impl = ProcOutputCache.Instance.get(options, evaluatorBean);
-		} else {
-			this.impl = newImpl(options, evaluatorBean);
+		if (options.startupWaitMs() < 0) {
+			
+			throw new IllegalArgumentException("'procOutStartupWaitMs' can't be negative - " + options);
 		}
+		
+		if (options.startupWaitMs() > MAX_STARTUP_WAIT_MS) {
+			
+			throw new IllegalArgumentException("'procOutStartupWaitMs' can't be grater than " + MAX_STARTUP_WAIT_MS + " - " + options);
+		}
+		
+		options.startupWaitPattern();
 	}
 	
 	@Override
@@ -71,7 +87,7 @@ public class ProcOutputStream extends OutputStream {
 			throw new IllegalStateException("closed");
 		}
 			
-		if (options.procOutAllowMultipleStreams) {
+		if (options.allowMultipleStreams()) {
 			
 			synchronized (this.impl) {
 				impl.write(b);
@@ -90,7 +106,7 @@ public class ProcOutputStream extends OutputStream {
 			throw new IllegalStateException("closed");
 		}
 		
-		if (options.procOutAllowMultipleStreams) {
+		if (options.allowMultipleStreams()) {
 			
 			synchronized (this.impl) {
 				impl.write(b, off, len);
@@ -109,7 +125,7 @@ public class ProcOutputStream extends OutputStream {
 			throw new IllegalStateException("closed");
 		}
 		
-		if (options.procOutAllowMultipleStreams) {
+		if (options.allowMultipleStreams()) {
 			
 			synchronized (this.impl) {
 				impl.flush();
@@ -121,21 +137,10 @@ public class ProcOutputStream extends OutputStream {
 		}		
 	}
 	
-	private void closeImpl() throws IOException {
-		
-		if ((this.options.procOutDestroyMode != ProcDestroyMode.CACHED) ||
-			(!ProcOutputCache.Instance.put(this.impl))) {
-
-			impl.close();
-		}
-		
-		this.impl = null;
-	}
-	
 	@Override
 	public void close() throws IOException {
 		
-		if (options.procOutAllowMultipleStreams) {
+		if (options.allowMultipleStreams()) {
 			
 			synchronized (this.impl) {
 				this.closeImpl();
@@ -147,90 +152,14 @@ public class ProcOutputStream extends OutputStream {
 		}
 	}
 	
-	private static ProcOutputStreamImpl newImpl(ProcOutputStreamOptions options, EvaluatorBean evaluatorBean) {
+	private void closeImpl() throws IOException {
 		
-		long destroyWait = (options.procOutDestroyWait != null) ?
-				((Number)evaluatorBean.eval(String.format("parseDuration(\"%s\")", 
-					options.procOutDestroyWait))).longValue() : 
-				0L;
-		
-		return new ProcOutputStreamImpl(options, destroyWait);
-	}
-	
-	private static class ProcOutputCache {
-		private static final ProcOutputCache Instance = new ProcOutputCache();
-		
-		private final Map<String, LinkedList<ProcOutputStreamImpl>> cache = new HashMap<>(4);
-		
-		private synchronized ProcOutputStreamImpl get(
-				ProcOutputStreamOptions options, EvaluatorBean evaluatorBean) {
-			
-			LinkedList<ProcOutputStreamImpl> queue = cache.get(options.command());
-			
-			if (queue != null) {
-				
-				Iterator<ProcOutputStreamImpl> iter = queue.iterator();
-				
-				while (iter.hasNext()) {
-					
-					ProcOutputStreamImpl curr = iter.next();
-					
-					if (!curr.isAlive()) {
-						iter.remove();
-						continue;
-					}
-					
-					if (!Objects.equals(
-						curr.options.procOutCommand, 
-						options.procOutCommand)) {
-						
-						continue;
-					}
-					
-					if (!Objects.equals(
-						curr.options.procOutArgs, 
-						options.procOutArgs)) {
-							
-						continue;
-					}
-					
-					if (!options.procOutAllowMultipleStreams) {
-						iter.remove();
-					}
-					
-					return curr;	
-				}
-			}
-			
-			ProcOutputStreamImpl result = newImpl(options, evaluatorBean);
-			
-			put(result);
-			
-			return result;
+		if ((this.options.destroyMode() != ProcDestroyMode.CACHED) ||
+			(!ProcOutputCache.Instance.put(this.impl))) {
+
+			impl.close();
 		}
-	
-		private synchronized boolean put(ProcOutputStreamImpl out){
-			
-			String key = out.options.command();
-			
-			LinkedList<ProcOutputStreamImpl> queue = cache.get(key);
-			
-			if (queue == null) {
-				queue = new LinkedList<>();
-				cache.put(key, queue);
-			}
-			
-			if (queue.contains(out)) {
-				return true;
-			}
-			
-			if (queue.size() < out.options.procOutMaxCacheSize) {	
-				
-				queue.add(out);
-				return true;
-			}
-			
-			return false;
-		}
+		
+		this.impl = null;
 	}
 }

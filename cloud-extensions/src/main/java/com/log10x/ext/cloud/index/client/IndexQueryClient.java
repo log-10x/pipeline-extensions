@@ -2,7 +2,6 @@ package com.log10x.ext.cloud.index.client;
 
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.Collection;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -10,43 +9,41 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.log10x.ext.cloud.index.interfaces.PipelineInvocationAccessor;
+import com.log10x.api.eval.EvaluatorBean;
+import com.log10x.api.pipeline.endpoint.PipelineEndpointAccessor;
+import com.log10x.api.pipeline.endpoint.PipelineLaunchRequest;
+import com.log10x.api.util.MapperUtil;
 import com.log10x.ext.cloud.index.util.ExecutorUtil;
-import com.log10x.ext.edge.invoke.PipelineLaunchRequest;
-import com.log10x.ext.edge.json.MapperUtil;
 
 /**
  * A utility class for serializing and async dispatching requests to invoke a
- * remote l1x pipeline via a REST endpoint.
+ * remote 10x pipeline via a REST endpoint.
  */
 public class IndexQueryClient {
-
-	private static final boolean DEBUG = false;
 
 	private static final int N_THREADS = 16;
 
 	private static final Logger logger = LogManager.getLogger(IndexQueryClient.class);
 
-	private final PipelineInvocationAccessor invocationAccessor;
+	private final PipelineEndpointAccessor invocationAccessor;
 	private final String queryEndpoint;
 	
 	private final URI endpointURI;
 
 	private final ExecutorService executorService;
+	
+	private final boolean debugMode;
 
 	protected class IndexQueryClientTask implements Runnable {
 
-		protected final Object values;
-
-		protected final Object pipelineArgs;
-
 		protected final PipelineLaunchRequest pipeline;
+		
+		protected final Object[] pipelineArgs;
 
-		protected IndexQueryClientTask(Object values, Object pipelineArgs, PipelineLaunchRequest pipeline) {
+		protected IndexQueryClientTask(PipelineLaunchRequest pipeline, Object[] pipelineArgs) {
 
-			this.values = values;
-			this.pipelineArgs = pipelineArgs;
 			this.pipeline = pipeline;
+			this.pipelineArgs = pipelineArgs;
 		}
 
 		@Override
@@ -54,7 +51,7 @@ public class IndexQueryClient {
 
 			try {
 
-				sendRequest(this.pipeline, this.values, this.pipelineArgs);
+				sendRequest(this.pipeline, this.pipelineArgs);
 
 			} catch (Exception e) {
 
@@ -62,7 +59,7 @@ public class IndexQueryClient {
 
 				try {
 
-					req = MapperUtil.jsonMapper.writeValueAsString(this.values);
+					req = MapperUtil.jsonMapper.writeValueAsString(this.pipelineArgs);
 
 				} catch (Exception e1) {
 					req = e1.toString();
@@ -73,7 +70,7 @@ public class IndexQueryClient {
 		}
 	}
 
-	public IndexQueryClient(PipelineInvocationAccessor invocationAccessor, String queryEndpoint) {
+	public IndexQueryClient(PipelineEndpointAccessor invocationAccessor, String queryEndpoint, EvaluatorBean evaluatorBean) {
 
 		this.invocationAccessor = invocationAccessor;
 		this.queryEndpoint = queryEndpoint;
@@ -84,17 +81,27 @@ public class IndexQueryClient {
 		} catch (URISyntaxException e) {
 			throw new IllegalStateException("could not parse URI: " + queryEndpoint, e);
 		}
+
+		Object raw = evaluatorBean.env("TENX_DEBUG_QUERY_CLIENT", Boolean.FALSE);
+
+		if (raw instanceof Boolean bool) {
+			this.debugMode = bool.booleanValue();
+		} else if (raw instanceof String s) {
+			this.debugMode = Boolean.valueOf(s);
+		} else {
+			this.debugMode = false;
+		}
 	}
 
-	protected void sendRequest(PipelineLaunchRequest pipeline, Object request, Object pipelineArgs) {
+	protected void sendRequest(PipelineLaunchRequest pipeline, Object[] pipelineArgs) {
 
 		PipelineLaunchRequest mergedRequest = null;
 
 		try {
 
-			mergedRequest = pipeline.override(request, pipelineArgs);
+			mergedRequest = pipeline.overwrite(pipelineArgs);
 
-			if (DEBUG) {
+			if (this.debugMode) {
 
 				System.out.println(mergedRequest);
 
@@ -108,7 +115,7 @@ public class IndexQueryClient {
 					
 				} catch (JsonProcessingException e) {
 					
-					throw new IllegalArgumentException("Failed creating json from " + request, e);
+					throw new IllegalArgumentException("Failed creating json from " + pipelineArgs, e);
 				}
 						
 				this.invocationAccessor.invoke(this.endpointURI, body);
@@ -119,23 +126,15 @@ public class IndexQueryClient {
 			throw new IllegalStateException("error invoking with: " + mergedRequest, e);
 		}
 	}
-
-	public void send(Collection<?> requests, Object pipelineArgs, PipelineLaunchRequest pipeline) {
-
-		for (Object request : requests) {
-			
-			send(request, pipelineArgs, pipeline);
-		}
-	}
 	
-	public void send(Object request, Object pipelineArgs, PipelineLaunchRequest pipeline) {
+	public void send(PipelineLaunchRequest pipeline, Object... pipelineArgs) {
 
 		if (logger.isDebugEnabled()) {
 
 			try {
 
 				logger.debug(
-						"submitting request: " + MapperUtil.jsonMapper.writeValueAsString(request));
+						"submitting request: " + MapperUtil.jsonMapper.writeValueAsString(pipelineArgs));
 
 			} catch (JsonProcessingException e) {
 
@@ -143,7 +142,7 @@ public class IndexQueryClient {
 			}
 		}
 
-		executorService.submit(new IndexQueryClientTask(request, pipelineArgs, pipeline));
+		executorService.submit(new IndexQueryClientTask(pipeline, pipelineArgs));
 	}
 
 	@Override

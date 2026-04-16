@@ -2,16 +2,15 @@ package com.log10x.ext.edge.micrometer.registry;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.util.Map;
 
-import com.log10x.ext.edge.micrometer.MapRegistryConfig;
-import com.log10x.ext.edge.micrometer.MetricRegistryFactory;
+import com.log10x.api.util.micrometer.MapRegistryConfig;
+import com.log10x.api.util.micrometer.MetricRegistryFactory;
 
 import io.micrometer.core.instrument.config.validate.PropertyValidator;
-import io.micrometer.prometheus.PrometheusConfig;
-import io.micrometer.prometheus.PrometheusMeterRegistry;
-import io.prometheus.client.exporter.HTTPServer;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
+import io.prometheus.metrics.exporter.httpserver.HTTPServer;
 
 public class PrometheusMetricRegistryFactory implements MetricRegistryFactory, Closeable {
 
@@ -40,8 +39,10 @@ public class PrometheusMetricRegistryFactory implements MetricRegistryFactory, C
 
 		PrometheusMeterRegistry result = new PrometheusMeterRegistry(config);
 
-		this.httpServer = new HTTPServer(new InetSocketAddress(port), 
-			result.getPrometheusRegistry(), true);
+		this.httpServer = HTTPServer.builder()
+				.port(port)
+				.registry(result.getPrometheusRegistry())
+				.buildAndStart();
 
 		return result;
 	}
