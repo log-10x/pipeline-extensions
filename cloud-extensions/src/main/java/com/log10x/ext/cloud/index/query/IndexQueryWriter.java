@@ -988,7 +988,10 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				options.queryLogLevels,
 				options.queryLogGroup,
 				options.queryWriteResults);
-		
+
+		logger.warn("[TRACE-Q] submitQuery: queryWriteResults={}, queryLogLevels='{}', queryId={}",
+			options.queryWriteResults, options.queryLogLevels, options.queryId);
+
 		do {
 
 			if (this.queryElapsed(false)) {
