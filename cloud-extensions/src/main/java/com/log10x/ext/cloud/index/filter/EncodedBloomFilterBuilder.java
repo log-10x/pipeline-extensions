@@ -219,14 +219,18 @@ public class EncodedBloomFilterBuilder {
 			int beforeSize = valueSet.size();
 			for (Map.Entry<Object, Object> entry : output.enrichmentFields.entrySet()) {
 
+				int b = valueSet.size();
 				this.appendValue(entry.getValue(), true);
+				int a = valueSet.size();
+				if (a > b) {
+					logger.warn("[TRACE-Q] BloomFilterBuilder.append: enrichment key='{}', value='{}', added {} tokens",
+						entry.getKey(), entry.getValue(), a - b);
+				}
 			}
 			int afterSize = valueSet.size();
-			if (logger.isWarnEnabled()) {
-				logger.warn("[TRACE-Q] BloomFilterBuilder.append: enrichmentFields.size={}, keys={}, valueSet grew {}→{} (+{})",
-					output.enrichmentFields.size(), output.enrichmentFields.keySet(),
-					beforeSize, afterSize, afterSize - beforeSize);
-			}
+			logger.warn("[TRACE-Q] BloomFilterBuilder.append: enrichmentFields.size={}, valueSet grew {}→{} (+{}), templateHash={}, vars={}",
+				output.enrichmentFields.size(), beforeSize, afterSize, afterSize - beforeSize,
+				output.templateHash, output.vars != null ? output.vars.length : "null");
 		} else {
 			logger.warn("[TRACE-Q] BloomFilterBuilder.append: enrichmentFields=null, templateHash={}, vars={}",
 				output.templateHash, output.vars != null ? output.vars.length : "null");
