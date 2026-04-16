@@ -4,7 +4,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.StringWriter;
-import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
@@ -17,6 +16,10 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Map;
 import java.util.Queue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -89,6 +92,25 @@ public class ForwardProtocolInputStream extends InputStream {
 
     private boolean closed;
 
+    // ── Watchdog: detect dead connections ────────────────────────────────────
+    /** If no message is decoded within this period, force-close the client socket. */
+    private static final long SOCKET_IDLE_TIMEOUT_MS = 60_000;
+    private volatile long lastDecodeTime = System.currentTimeMillis();
+    private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "forward-input-watchdog");
+        t.setDaemon(true);
+        return t;
+    });
+
+    // ── Diagnostic counters ───────────────────────────────────────────────────
+    private static final long STATS_INTERVAL_MS = 30_000;
+    private final AtomicLong recordsDecoded = new AtomicLong();
+    private final AtomicLong recordsConsumed = new AtomicLong();
+    private final AtomicLong bytesEmitted = new AtomicLong();
+    private long lastStatsTime = System.currentTimeMillis();
+    private long lastRecordsDecoded = 0;
+    private long lastRecordsConsumed = 0;
+
     /**
      * Constructor invoked by the Log10x runtime.
      *
@@ -124,6 +146,7 @@ public class ForwardProtocolInputStream extends InputStream {
         }
 
         open();
+        startWatchdog();
     }
 
     private void open() throws IOException {
@@ -147,12 +170,31 @@ public class ForwardProtocolInputStream extends InputStream {
         }
     }
 
+    private void startWatchdog() {
+        watchdog.scheduleAtFixedRate(() -> {
+            try {
+                SocketChannel c = client;
+                if (c != null && c.isOpen()) {
+                    long idle = System.currentTimeMillis() - lastDecodeTime;
+                    if (idle > SOCKET_IDLE_TIMEOUT_MS) {
+                        logger.warn("socket idle for {}ms with no decoded messages, forcing reconnection", idle);
+                        c.close(); // unblocks the read thread with AsynchronousCloseException
+                    }
+                }
+            } catch (Exception e) {
+                logger.debug("watchdog tick error", e);
+            }
+        }, SOCKET_IDLE_TIMEOUT_MS, SOCKET_IDLE_TIMEOUT_MS / 2, TimeUnit.MILLISECONDS);
+    }
+
     private void acceptClient() throws IOException {
         if (client == null || !client.isOpen()) {
-            logger.debug("waiting for client connection on: {}", socketPath);
+            logger.debug("waiting for client connection on: {}",
+                    socketPath != null ? socketPath : "tcp://0.0.0.0:" + port);
             client = server.accept();
             unpacker = MessagePack.newDefaultUnpacker(Channels.newInputStream(client));
-            logger.info("client connected to Forward protocol socket: {}", socketPath);
+            logger.info("client connected to Forward protocol input: {}",
+                    socketPath != null ? socketPath : "tcp://0.0.0.0:" + port);
         }
     }
 
@@ -168,6 +210,8 @@ public class ForwardProtocolInputStream extends InputStream {
         while (true) {
             String queued = lineQueue.poll();
             if (queued != null) {
+                recordsConsumed.incrementAndGet();
+                logStatsIfDue();
                 return queued;
             }
 
@@ -177,8 +221,29 @@ public class ForwardProtocolInputStream extends InputStream {
             } catch (MessageInsufficientBufferException | EOFException e) {
                 logger.info("client disconnected, waiting for new connection");
                 closeClient();
+            } catch (IOException e) {
+                logger.info("client connection lost ({}), waiting for new connection", e.getMessage());
+                closeClient();
             }
         }
+    }
+
+    private void logStatsIfDue() {
+        long now = System.currentTimeMillis();
+        if (now - lastStatsTime < STATS_INTERVAL_MS) {
+            return;
+        }
+        long decoded = recordsDecoded.get();
+        long consumed = recordsConsumed.get();
+        long bytes = bytesEmitted.get();
+        long deltaDecoded = decoded - lastRecordsDecoded;
+        long deltaConsumed = consumed - lastRecordsConsumed;
+        long pending = lineQueue.size();
+        logger.debug("forward-input stats: decoded={} consumed={} delta(decoded={}, consumed={}) pending={} bytes={}",
+                decoded, consumed, deltaDecoded, deltaConsumed, pending, bytes);
+        lastRecordsDecoded = decoded;
+        lastRecordsConsumed = consumed;
+        lastStatsTime = now;
     }
 
     // ── Forward protocol decoding ──────────────────────────────────────────────
@@ -231,6 +296,8 @@ public class ForwardProtocolInputStream extends InputStream {
         for (int i = consumed; i < arraySize; i++) {
             unpacker.skipValue();
         }
+
+        lastDecodeTime = System.currentTimeMillis();
     }
 
     /**
@@ -293,6 +360,7 @@ public class ForwardProtocolInputStream extends InputStream {
         }
 
         lineQueue.add(sw.toString());
+        recordsDecoded.incrementAndGet();
     }
 
     /**
@@ -410,6 +478,7 @@ public class ForwardProtocolInputStream extends InputStream {
                 pendingBytes = null;
                 pendingOffset = 0;
             }
+            bytesEmitted.addAndGet(copyLen);
             return copyLen;
         }
 
@@ -427,6 +496,7 @@ public class ForwardProtocolInputStream extends InputStream {
             pendingOffset = copyLen;
         }
 
+        bytesEmitted.addAndGet(copyLen);
         return copyLen;
     }
 
@@ -458,6 +528,7 @@ public class ForwardProtocolInputStream extends InputStream {
         closed = true;
         logger.info("closing Forward protocol input stream: {}", socketPath);
 
+        watchdog.shutdownNow();
         closeClient();
 
         try {
