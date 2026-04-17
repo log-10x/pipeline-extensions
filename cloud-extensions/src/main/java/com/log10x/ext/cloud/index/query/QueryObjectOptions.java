@@ -79,14 +79,14 @@ public class QueryObjectOptions implements QueryObjectRequest {
 		this.writeResults = writeResults;
 	}
 
-	public QueryObjectOptions(QueryObjectRequest other, int segmentSize) {
+	public QueryObjectOptions(QueryObjectRequest other, int segmentSize, boolean writeResults) {
 
 		this(other.name(), other.accessorAlias(), ArgsUtil.toList(other.args()),
 			other.filter(), other.target(), other.inputObject(),
 			other.inputContainer(), other.indexContainer(),
 			other.from(), other.to(), new long [segmentSize * 2],
 			other.ID(), other.elapseTime(), other.queryLogLevels(), other.queryLogGroup(),
-			false);
+			writeResults);
 	}
 
 	public QueryObjectOptions() {
@@ -165,8 +165,8 @@ public class QueryObjectOptions implements QueryObjectRequest {
 	public QueryObjectOptions subOptions(int from, int to) {
 
 		int size = to - from;
-		
-		QueryObjectOptions result = new QueryObjectOptions(this, size);
+
+		QueryObjectOptions result = new QueryObjectOptions(this, size, this.writeResults);
 		
 		System.arraycopy(
 				this.byteRanges(), from * 2,
