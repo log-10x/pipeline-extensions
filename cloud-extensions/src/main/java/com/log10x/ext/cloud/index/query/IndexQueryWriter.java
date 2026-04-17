@@ -34,6 +34,8 @@ import com.log10x.api.pipeline.launch.PipelineLaunchOptions;
 import com.log10x.api.util.MapperUtil;
 import com.log10x.ext.cloud.index.client.IndexQueryClient;
 import com.log10x.ext.cloud.index.filter.DecodedBloomFilter;
+import static com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.MDC_QUERY_ID;
+
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.IndexObjectType;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.QueryLogLevel;

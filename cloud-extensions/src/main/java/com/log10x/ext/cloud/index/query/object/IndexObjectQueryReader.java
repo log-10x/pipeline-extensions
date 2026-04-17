@@ -16,6 +16,8 @@ import org.apache.logging.log4j.ThreadContext;
 import com.log10x.api.eval.EvaluatorBean;
 import com.log10x.api.pipeline.launch.PipelineLaunchOptions;
 import com.log10x.api.util.MapperUtil;
+import static com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.MDC_QUERY_ID;
+
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.QueryLogLevel;
 import com.log10x.ext.cloud.index.shared.BaseIndexReader;
