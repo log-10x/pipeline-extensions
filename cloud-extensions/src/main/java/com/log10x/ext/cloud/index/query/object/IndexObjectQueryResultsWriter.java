@@ -101,6 +101,8 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 		this.workerID = (String) evaluatorBean.env(PipelineLaunchOptions.UNIQUE_ID);
 		this.logLevels = options.queryObjectLogLevels;
 
+		org.apache.logging.log4j.ThreadContext.put("queryId", this.queryId);
+
 		Object capEnv = evaluatorBean.env("queryObjectResultsMaxEvents");
 		int parsedCap = DEFAULT_MAX_EVENTS_PER_WORKER;
 		if (capEnv != null) {
@@ -249,6 +251,7 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 			} catch (IOException ignored) {
 			}
 
+			org.apache.logging.log4j.ThreadContext.remove("queryId");
 			super.close();
 		}
 

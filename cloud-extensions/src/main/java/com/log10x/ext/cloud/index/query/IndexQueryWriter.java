@@ -282,7 +282,9 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		this.queryId = (options.queryId != null && !options.queryId.isBlank()) ?
 			options.queryId :
 			UUID.randomUUID().toString();
-		
+
+		org.apache.logging.log4j.ThreadContext.put("queryId", this.queryId);
+
 		if (options.queryLimitProcessingTime != 0) {
 		
 			this.queryElapseTime =  (options.queryElapseTime != 0) ?
@@ -614,7 +616,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		
 		this.submitMatchingByteRanges(output);
 
-		logQuery(QueryLogLevel.DEBUG,
+		logQuery(QueryLogLevel.PERF,
 			String.format("scan complete: scanned=%d, matched=%d, skippedDuplicate=%d, skippedSearch=%d, skippedTemplate=%d",
 				scannedKeys, matchedKeys, skippedDuplicate, skippedSearchFilter, skippedTemplateHash),
 			Map.of("scanned", scannedKeys, "matched", matchedKeys,
@@ -875,6 +877,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			this.closed = true;
 		}
 
+		org.apache.logging.log4j.ThreadContext.remove("queryId");
 		super.close();
 	}
 
@@ -901,7 +904,12 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 		if (isEmptyQuery()) {
 			logger.warn("No matching template hashes or vars, not submitting empty query");
-			logQuery(QueryLogLevel.DEBUG, "query empty: no matching template hashes or vars");
+			logQuery(QueryLogLevel.INFO,
+				String.format("query empty: no matching template hashes or vars (templateHashes=%d, vars=%d)",
+					this.templateHashes.size(), this.vars.size()),
+				Map.of("reason", "no_template_hashes_or_vars",
+					"templateHashCount", this.templateHashes.size(),
+					"varsCount", this.vars.size()));
 			return;
 		}
 
@@ -923,10 +931,20 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				options.queryFrom, options.queryTo, queryRange,
 				options.queryLimitProcessingTime, options.queryLimitResultSize));
 
+		boolean isRemoteDispatch = (this.timeslice != 0) && (this.timeslice < queryRange);
+
+		logQuery(QueryLogLevel.INFO,
+				String.format("query plan: templateHashes=%d, vars=%d, timeslice=%dms, dispatch=%s",
+				this.templateHashes.size(), this.vars.size(), this.timeslice,
+				isRemoteDispatch ? "remote" : "local"),
+				Map.of("templateHashes", this.templateHashes.size(),
+					"vars", this.vars.size(),
+					"timeslice", this.timeslice,
+					"dispatch", isRemoteDispatch ? "remote" : "local"));
+
 		try {
 
-			if ((this.timeslice != 0) &&
-				(this.timeslice < queryRange)) {
+			if (isRemoteDispatch) {
 
 				this.submitToEndpoint();
 

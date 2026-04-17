@@ -69,6 +69,8 @@ public class IndexObjectQueryWriter extends BaseIndexWriter {
 		this.workerID = (String) evaluatorBean.env(PipelineLaunchOptions.UNIQUE_ID);
 		this.logLevels = options.queryObjectLogLevels;
 
+		org.apache.logging.log4j.ThreadContext.put("queryId", this.queryId);
+
 		this.utf8Sizes = new AtomicLong();
 		
 		MessageDigest md = MessageDigest.getInstance("MD5");
@@ -145,6 +147,7 @@ public class IndexObjectQueryWriter extends BaseIndexWriter {
 			throw e;
 		}
 
+		org.apache.logging.log4j.ThreadContext.remove("queryId");
 		super.close();
 	}
 }

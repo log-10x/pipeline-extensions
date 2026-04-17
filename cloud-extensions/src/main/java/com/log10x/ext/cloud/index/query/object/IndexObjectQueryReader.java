@@ -53,6 +53,8 @@ public class IndexObjectQueryReader extends BaseIndexReader {
 		this.workerID = (String) evaluatorBean.env(PipelineLaunchOptions.UNIQUE_ID);
 		this.logLevels = options.queryObjectLogLevels;
 
+		org.apache.logging.log4j.ThreadContext.put("queryId", this.queryId);
+
 		InputStream	inputStream = this.createInputStream(options);
 
 		this.reader = this.createTermReader(inputStream);
