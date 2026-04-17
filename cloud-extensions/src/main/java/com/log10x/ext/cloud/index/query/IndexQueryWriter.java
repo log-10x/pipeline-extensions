@@ -270,6 +270,16 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 		this.templateHashes = new HashSet<String>(options.queryFilterTemplateHashes);
 
+		this.vars = new ArrayList<>(options.queryFilterVars.size());
+
+		for (String queryFilterVar : options.queryFilterVars) {
+			vars.add(Arrays.asList(queryFilterVar.split(VAR_SEPERATOR)));
+		}
+
+		this.queryId = (options.queryId != null && !options.queryId.isBlank()) ?
+			options.queryId :
+			UUID.randomUUID().toString();
+
 		if (logger.isDebugEnabled()) {
 			logger.debug("query init: search={}, filterVars={}, filterTemplateHashes={}, queryId={}",
 				options.querySearch,
@@ -277,16 +287,6 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				options.queryFilterTemplateHashes != null ? options.queryFilterTemplateHashes.size() : 0,
 				this.queryId);
 		}
-		
-		this.vars = new ArrayList<>(options.queryFilterVars.size());
-		
-		for (String queryFilterVar : options.queryFilterVars) {
-			vars.add(Arrays.asList(queryFilterVar.split(VAR_SEPERATOR)));
-		}
-				
-		this.queryId = (options.queryId != null && !options.queryId.isBlank()) ?
-			options.queryId :
-			UUID.randomUUID().toString();
 
 		ThreadContext.put(MDC_QUERY_ID, this.queryId);
 
