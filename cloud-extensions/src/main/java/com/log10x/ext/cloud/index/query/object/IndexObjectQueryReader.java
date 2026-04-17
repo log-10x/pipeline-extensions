@@ -11,6 +11,7 @@ import java.util.TreeMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.ThreadContext;
 
 import com.log10x.api.eval.EvaluatorBean;
 import com.log10x.api.pipeline.launch.PipelineLaunchOptions;
@@ -53,7 +54,7 @@ public class IndexObjectQueryReader extends BaseIndexReader {
 		this.workerID = (String) evaluatorBean.env(PipelineLaunchOptions.UNIQUE_ID);
 		this.logLevels = options.queryObjectLogLevels;
 
-		org.apache.logging.log4j.ThreadContext.put("queryId", this.queryId);
+		ThreadContext.put(MDC_QUERY_ID, this.queryId);
 
 		InputStream	inputStream = this.createInputStream(options);
 

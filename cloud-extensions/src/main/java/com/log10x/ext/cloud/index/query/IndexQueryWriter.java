@@ -24,6 +24,7 @@ import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.ThreadContext;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
@@ -267,11 +268,13 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 		this.templateHashes = new HashSet<String>(options.queryFilterTemplateHashes);
 
-		logger.warn("[TRACE-Q] IndexQueryWriter INIT: querySearch={}, queryFilterVars.size={}, queryFilterTemplateHashes.size={}, queryId={}",
-			options.querySearch,
-			options.queryFilterVars != null ? options.queryFilterVars.size() : "null",
-			options.queryFilterTemplateHashes != null ? options.queryFilterTemplateHashes.size() : "null",
-			options.queryId != null ? options.queryId : "null");
+		if (logger.isDebugEnabled()) {
+			logger.debug("query init: search={}, filterVars={}, filterTemplateHashes={}, queryId={}",
+				options.querySearch,
+				options.queryFilterVars != null ? options.queryFilterVars.size() : 0,
+				options.queryFilterTemplateHashes != null ? options.queryFilterTemplateHashes.size() : 0,
+				this.queryId);
+		}
 		
 		this.vars = new ArrayList<>(options.queryFilterVars.size());
 		
@@ -283,7 +286,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			options.queryId :
 			UUID.randomUUID().toString();
 
-		org.apache.logging.log4j.ThreadContext.put("queryId", this.queryId);
+		ThreadContext.put(MDC_QUERY_ID, this.queryId);
 
 		if (options.queryLimitProcessingTime != 0) {
 		
@@ -387,8 +390,6 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			if (currInputValue.templateHash != null) {
 
 				templateHashes.add(currInputValue.templateHash);
-				logger.warn("[TRACE-Q] flush: added templateHash={}, total templateHashes={}",
-					currInputValue.templateHash, templateHashes.size());
 
 			} else {
 
@@ -397,19 +398,11 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				if ((currInputValue.enrichmentValues != null) &&
 					(currInputValue.enrichmentValues.length > 0)) {
 
-					logger.warn("[TRACE-Q] flush: enrichmentValues.length={}, values={}",
-						currInputValue.enrichmentValues.length,
-						java.util.Arrays.toString(currInputValue.enrichmentValues));
-
 					for (String enrichmentValue : currInputValue.enrichmentValues) {
 
 						this.tokenSplitter.fill(enrichmentValue, inputVars);
 					}
 				} else if (currInputValue.vars != null) {
-
-					logger.warn("[TRACE-Q] flush: vars.length={}, values={}",
-						currInputValue.vars.length,
-						java.util.Arrays.toString(currInputValue.vars));
 
 					for (Object rawVar : currInputValue.vars) {
 
@@ -417,13 +410,11 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 						inputVars.add(stringVar);
 					}
-				} else {
-					logger.warn("[TRACE-Q] flush: no templateHash, no enrichmentValues, no vars. raw={}",
+				} else if (logger.isDebugEnabled()) {
+					logger.debug("flush: no templateHash, enrichmentValues, or vars. raw={}",
 						this.currChars.builder.toString().substring(0, Math.min(200, this.currChars.builder.length())));
 				}
 
-				logger.warn("[TRACE-Q] flush: inputVars={}, vars.size after add={}",
-					inputVars, vars.size() + 1);
 				vars.add(inputVars);
 			}
 
@@ -450,7 +441,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		public Boolean apply(Integer index) {
 
 			if (index >= vars.size()) {
-				logger.warn("[TRACE-Q] BloomFilter.apply: index {} >= vars.size {}. Returning false.", index, vars.size());
+				logger.warn("BloomFilter.apply: index {} >= vars.size {}",  index, vars.size());
 				return false;
 			}
 
@@ -458,16 +449,13 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 			for (String indexVar : indexVars) {
 
-				boolean found = this.test(indexVar);
-				if (!found) {
-					logger.warn("[TRACE-Q] BloomFilter.apply: index={}, var='{}' NOT in filter. Returning false. Total vars for index: {}",
-						index, indexVar, indexVars.size());
+				if (!this.test(indexVar)) {
 					return false;
 				}
 			}
 
-			if (indexVars.isEmpty()) {
-				logger.warn("[TRACE-Q] BloomFilter.apply: index={}, vars list is EMPTY. Returning true (vacuous).", index);
+			if (indexVars.isEmpty() && logger.isDebugEnabled()) {
+				logger.debug("BloomFilter.apply: empty vars at index={}, returning true (vacuous)", index);
 			}
 
 			return true;
@@ -549,11 +537,6 @@ public class IndexQueryWriter extends BaseIndexWriter {
 					(!eval.evaluate(filter))) {
 
 					skippedSearchFilter++;
-					if (scannedKeys <= 3) {
-						logger.warn("[TRACE-Q] iterateIndexObjects: SKIPPED by search filter. key={}, eval constants={}, vars.size={}",
-							indexObjectKey.substring(0, Math.min(80, indexObjectKey.length())),
-							eval.constants(), vars.size());
-					}
 					continue;
 				}
 
@@ -561,16 +544,7 @@ public class IndexQueryWriter extends BaseIndexWriter {
 					(!filter.testAny(this.templateHashes))) {
 
 					skippedTemplateHash++;
-					if (scannedKeys <= 3) {
-						logger.warn("[TRACE-Q] iterateIndexObjects: SKIPPED by templateHash filter. key={}, templateHashes={}",
-							indexObjectKey.substring(0, Math.min(80, indexObjectKey.length())),
-							templateHashes.size());
-					}
 					continue;
-				}
-
-				if (scannedKeys <= 3) {
-					logger.warn("[TRACE-Q] iterateIndexObjects: MATCHED key={}", indexObjectKey.substring(0, Math.min(80, indexObjectKey.length())));
 				}
 				
 				TargetObjectByteRangeIndex blobByteRangeIndex;
@@ -877,33 +851,32 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			this.closed = true;
 		}
 
-		org.apache.logging.log4j.ThreadContext.remove("queryId");
-		super.close();
+		try {
+			super.close();
+		} finally {
+			ThreadContext.remove(MDC_QUERY_ID);
+		}
 	}
 
 	private boolean isEmptyQuery() {
 
 		if (!this.templateHashes.isEmpty()) {
-			logger.warn("[TRACE-Q] isEmptyQuery: templateHashes non-empty (size={}), returning false", templateHashes.size());
 			return false;
 		}
 
 		for (List<String> current : this.vars) {
 
 			if (!current.isEmpty()) {
-				logger.warn("[TRACE-Q] isEmptyQuery: found non-empty vars entry (size={}), returning false. vars total={}", current.size(), vars.size());
 				return false;
 			}
 		}
 
-		logger.warn("[TRACE-Q] isEmptyQuery: returning TRUE — templateHashes.size={}, vars.size={}", templateHashes.size(), vars.size());
 		return true;
 	}
 
 	private void submitQuery() {
 
 		if (isEmptyQuery()) {
-			logger.warn("No matching template hashes or vars, not submitting empty query");
 			logQuery(QueryLogLevel.INFO,
 				String.format("query empty: no matching template hashes or vars (templateHashes=%d, vars=%d)",
 					this.templateHashes.size(), this.vars.size()),
@@ -1006,9 +979,6 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				options.queryLogLevels,
 				options.queryLogGroup,
 				options.queryWriteResults);
-
-		logger.warn("[TRACE-Q] submitQuery: queryWriteResults={}, queryLogLevels='{}', queryId={}",
-			options.queryWriteResults, options.queryLogLevels, options.queryId);
 
 		do {
 

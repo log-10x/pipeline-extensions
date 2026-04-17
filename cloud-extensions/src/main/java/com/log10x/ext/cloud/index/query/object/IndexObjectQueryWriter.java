@@ -15,6 +15,8 @@ import com.log10x.api.util.MapperUtil;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.IndexObjectType;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.QueryLogLevel;
+import org.apache.logging.log4j.ThreadContext;
+
 import com.log10x.ext.cloud.index.shared.BaseIndexWriter;
 
 /**
@@ -69,7 +71,7 @@ public class IndexObjectQueryWriter extends BaseIndexWriter {
 		this.workerID = (String) evaluatorBean.env(PipelineLaunchOptions.UNIQUE_ID);
 		this.logLevels = options.queryObjectLogLevels;
 
-		org.apache.logging.log4j.ThreadContext.put("queryId", this.queryId);
+		ThreadContext.put(MDC_QUERY_ID, this.queryId);
 
 		this.utf8Sizes = new AtomicLong();
 		
@@ -147,7 +149,10 @@ public class IndexObjectQueryWriter extends BaseIndexWriter {
 			throw e;
 		}
 
-		org.apache.logging.log4j.ThreadContext.remove("queryId");
-		super.close();
+		try {
+			super.close();
+		} finally {
+			ThreadContext.remove(MDC_QUERY_ID);
+		}
 	}
 }

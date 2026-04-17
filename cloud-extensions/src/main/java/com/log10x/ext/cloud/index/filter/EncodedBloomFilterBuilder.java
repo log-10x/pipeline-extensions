@@ -216,24 +216,13 @@ public class EncodedBloomFilterBuilder {
 
 		if (output.enrichmentFields != null) {
 
-			int beforeSize = valueSet.size();
-			for (Map.Entry<Object, Object> entry : output.enrichmentFields.entrySet()) {
+			for (Object enrichmentValue : output.enrichmentFields.values()) {
 
-				int b = valueSet.size();
-				this.appendValue(entry.getValue(), true);
-				int a = valueSet.size();
-				if (a > b) {
-					logger.warn("[TRACE-Q] BloomFilterBuilder.append: enrichment key='{}', value='{}', added {} tokens",
-						entry.getKey(), entry.getValue(), a - b);
-				}
+				this.appendValue(enrichmentValue, true);
 			}
-			int afterSize = valueSet.size();
-			logger.warn("[TRACE-Q] BloomFilterBuilder.append: enrichmentFields.size={}, valueSet grew {}→{} (+{}), templateHash={}, vars={}",
-				output.enrichmentFields.size(), beforeSize, afterSize, afterSize - beforeSize,
-				output.templateHash, output.vars != null ? output.vars.length : "null");
-		} else {
-			logger.warn("[TRACE-Q] BloomFilterBuilder.append: enrichmentFields=null, templateHash={}, vars={}",
-				output.templateHash, output.vars != null ? output.vars.length : "null");
+		} else if (logger.isDebugEnabled()) {
+			logger.debug("append: enrichmentFields=null, templateHash={}, vars={}",
+				output.templateHash, output.vars != null ? output.vars.length : 0);
 		}
 
 		int size = valueSet.size();

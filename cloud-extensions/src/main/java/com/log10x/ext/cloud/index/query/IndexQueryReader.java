@@ -125,8 +125,10 @@ public class IndexQueryReader extends CompositeIndexReader {
 
 			evaluatorBean.set("querySearch", templateTerms);
 
-			logger.warn("[TRACE-Q] createReaders: constants={}, templateTerms={}, eventTerms={}",
-				constants, templateTerms, eventTerms);
+			if (logger.isDebugEnabled()) {
+				logger.debug("createReaders: constants={}, templateTerms={}, eventTerms={}",
+					constants, templateTerms, eventTerms);
+			}
 
 			queryTermsReader = new StringBuilderReader(
 				String.join(
