@@ -78,6 +78,10 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 
 	private long truncatedCount;
 
+	private long emptyFlushCount;
+
+	private long controlCharEventCount;
+
 	private boolean truncated;
 
 	private boolean closed;
@@ -146,6 +150,7 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 			}
 
 			if (currChars.builder.length() == 0) {
+				emptyFlushCount++;
 				super.flush();
 				return;
 			}
@@ -163,13 +168,33 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 			// (Ticket 0 — 6% corruption rate from unescaped \n in the
 			// text field). This boundary check catches any that slip through.
 			CharSequence content = currChars.builder;
-			if (containsControlChar(content)) {
+			boolean hasControl = containsControlChar(content);
+			if (hasControl) {
+				controlCharEventCount++;
 				tempWriter.append(escapeControlChars(content));
 			} else {
 				tempWriter.append(content);
 			}
 			tempWriter.newLine();
 			eventCount++;
+
+			// #4 Per-event TRACE. One line per event that passed the filter
+			// AND the parser. Lets a DEBUG-escalated query see which events
+			// the filter/parser actually delivered (first N chars of content)
+			// so field-name/shape mismatches are visible rather than inferred.
+			// Gated by shouldLog() so this stays quiet for production runs.
+			if (shouldLog(QueryLogLevel.DEBUG)) {
+				int len = content.length();
+				String preview = (len > 160 ? content.subSequence(0, 160) + "..." : content.toString());
+				indexAccessor.logQueryEvent(this.queryId, this.workerID,
+					QueryLogLevel.DEBUG,
+					String.format("results writer event: idx=%d, bytes=%d, controlChars=%s",
+						eventCount, len, hasControl),
+					Map.of("eventIndex", eventCount,
+						"bytes", len,
+						"controlChars", hasControl,
+						"preview", preview));
+			}
 
 		} catch (IOException e) {
 
@@ -227,13 +252,21 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 				}
 			}
 
+			// #5 Worker lifecycle summary — enriched with total flush calls
+			// (events + empty flushes) and control-char event count. The ratio
+			// emptyFlushes : resultEvents tells us how many "rows" reached
+			// the writer and were blank (parser ran but produced no event vs.
+			// filter dropped pre-write). controlCharEvents counts events that
+			// needed JSONL-control-char escaping.
 			if (shouldLog(QueryLogLevel.PERF)) {
 				indexAccessor.logQueryEvent(this.queryId, this.workerID,
 					QueryLogLevel.PERF,
-					String.format("results writer complete: %d events written, %d dropped, %d bytes",
-						eventCount, truncatedCount, fileSize),
+					String.format("results writer complete: %d events written, %d dropped, %d emptyFlushes, %d controlCharEvents, %d bytes",
+						eventCount, truncatedCount, emptyFlushCount, controlCharEventCount, fileSize),
 					Map.of("resultEvents", eventCount,
 						"resultsTruncated", truncatedCount,
+						"emptyFlushes", emptyFlushCount,
+						"controlCharEvents", controlCharEventCount,
 						"resultsBytes", fileSize));
 			}
 

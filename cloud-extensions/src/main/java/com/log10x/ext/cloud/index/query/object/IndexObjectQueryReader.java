@@ -129,6 +129,7 @@ public class IndexObjectQueryReader extends BaseIndexReader {
 		}
 
 		InputStream storageStream;
+		long fetchStartMs = System.currentTimeMillis();
 		try {
 			storageStream = this.indexAccessor.readObject(
 				options.queryObjectTargetObject, initialOffset, (int)rangeEnd);
@@ -139,17 +140,32 @@ public class IndexObjectQueryReader extends BaseIndexReader {
 						QueryLogLevel.ERROR,
 						String.format("stream worker error: failed reading object=%s, offset=%d, bytes=%d: %s",
 							options.queryObjectTargetObject, initialOffset, (int)rangeEnd, e.getMessage()),
-						null);
+						Map.of("object", options.queryObjectTargetObject,
+							"offset", initialOffset,
+							"requestedBytes", (int)rangeEnd,
+							"error", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage())));
 			}
 			throw e;
 		}
 
+		// #3 Per-fetch S3 read. The prior log only recorded the REQUESTED
+		// byte range; it said nothing about the open call's latency, the
+		// InputStream's origin, or whether the accessor actually produced
+		// a usable stream. For the "stream worker complete: fetched 0 bytes"
+		// symptom, this is the only event that can distinguish "S3 returned
+		// empty" from "parser never ran" from "filter rejected everything".
 		if (shouldLog(QueryLogLevel.DEBUG)) {
 			this.indexAccessor.logQueryEvent(this.queryId, this.workerID,
 				QueryLogLevel.DEBUG,
-				String.format("stream worker read: object=%s, offset=%d, bytes=%d",
-					options.queryObjectTargetObject, initialOffset, (int)rangeEnd),
-				null);
+				String.format("stream worker fetch: object=%s, offset=%d, requestedBytes=%d, openMs=%d, streamType=%s",
+					options.queryObjectTargetObject, initialOffset, (int)rangeEnd,
+					System.currentTimeMillis() - fetchStartMs,
+					storageStream == null ? "null" : storageStream.getClass().getSimpleName()),
+				Map.of("object", options.queryObjectTargetObject,
+					"offset", initialOffset,
+					"requestedBytes", (int)rangeEnd,
+					"openMs", System.currentTimeMillis() - fetchStartMs,
+					"streamType", storageStream == null ? "null" : storageStream.getClass().getSimpleName()));
 		}
 
 		return new ByteRangeFilterInputStream(storageStream,
