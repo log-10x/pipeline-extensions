@@ -63,22 +63,35 @@ public class IndexObjectQueryReader extends BaseIndexReader {
 		this.reader = this.createTermReader(inputStream);
 	}
 	
-	private InputStream createInputStream(IndexQueryObjectOptions options) throws IOException {
-		
-		long now = System.currentTimeMillis();
-		
-		long elapseTime = options.elapseTime();
-		
-		if ((elapseTime != 0) &&
-			(now > elapseTime)) {
+	// How long past the query's overall deadline we still let a stream worker
+	// start. Anything past this is treated as an abandoned query and skipped.
+	// Set generously because the original query deadline is shared across the
+	// coordinator's scan phase + SQS dispatch + stream-worker execution, and
+	// worker dispatch latency on a busy cluster can easily eat several
+	// minutes before this worker picks up its message.
+	private static final long POST_DEADLINE_GRACE_MS = 10 * 60 * 1000L;
 
-			logger.info("skipping query {}: elapsed time exceeded", options.ID());
+	private InputStream createInputStream(IndexQueryObjectOptions options) throws IOException {
+
+		long now = System.currentTimeMillis();
+
+		long elapseTime = options.elapseTime();
+
+		// Only skip if we are far past the query deadline — e.g. a stale
+		// message that lingered in SQS after the user already gave up. Short
+		// overshoots are normal and must NOT prevent the worker from running,
+		// otherwise the scan phase eating the default budget starves every
+		// worker and the user sees zero events.
+		if ((elapseTime != 0) &&
+			(now > elapseTime + POST_DEADLINE_GRACE_MS)) {
+
+			logger.info("skipping query {}: stale (past deadline + grace)", options.ID());
 
 			if (shouldLog(QueryLogLevel.ERROR)) {
 				this.indexAccessor.logQueryEvent(this.queryId, this.workerID,
 						QueryLogLevel.ERROR,
-						String.format("stream worker skipped: processing time limit exceeded (elapsed %dms over deadline)",
-							now - elapseTime),
+						String.format("stream worker skipped: stale message %dms past deadline (grace=%dms)",
+							now - elapseTime, POST_DEADLINE_GRACE_MS),
 						null);
 			}
 
