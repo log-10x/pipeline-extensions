@@ -1051,11 +1051,30 @@ public class AWSIndexAccess implements ObjectStorageIndexAccessor {
 
 	private void sqsSendMessage(String queueName, String body) {
 
-		SendMessageRequest sendMessageRequest =
-				SendMessageRequest.builder()
-					.queueUrl(queueName)
-					.messageBody(body)
-					.build();
+		// O13 — propagate W3C trace context across the SQS hop. If the
+		// current thread has a traceparent in MDC (set by the query-app's
+		// entry HTTP handler or by a prior sqsReceive), attach it as an
+		// SQS MessageAttribute so the consuming worker can resume the span.
+		// If absent, omit the attribute — receivers tolerate missing context.
+		String traceparent = org.apache.logging.log4j.ThreadContext.get("traceparent");
+		String tracestate = org.apache.logging.log4j.ThreadContext.get("tracestate");
+
+		SendMessageRequest.Builder builder = SendMessageRequest.builder()
+				.queueUrl(queueName)
+				.messageBody(body);
+
+		if ((traceparent != null) && (!traceparent.isEmpty())) {
+			java.util.Map<String, software.amazon.awssdk.services.sqs.model.MessageAttributeValue> attrs = new java.util.HashMap<>();
+			attrs.put("traceparent", software.amazon.awssdk.services.sqs.model.MessageAttributeValue.builder()
+				.dataType("String").stringValue(traceparent).build());
+			if ((tracestate != null) && (!tracestate.isEmpty())) {
+				attrs.put("tracestate", software.amazon.awssdk.services.sqs.model.MessageAttributeValue.builder()
+					.dataType("String").stringValue(tracestate).build());
+			}
+			builder.messageAttributes(attrs);
+		}
+
+		SendMessageRequest sendMessageRequest = builder.build();
 
 		CompletableFuture<SendMessageResponse> future = this.clients.sqsClient()
 				.sendMessage(sendMessageRequest)
