@@ -249,12 +249,32 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 	private void logQuery(QueryLogLevel level, String message) {
 		if (!shouldLog(level)) return;
-		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, null);
+		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, traceContextMetadata(null));
 	}
 
 	private void logQuery(QueryLogLevel level, String message, Map<String, Object> metadata) {
 		if (!shouldLog(level)) return;
-		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, metadata);
+		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, traceContextMetadata(metadata));
+	}
+
+	/**
+	 * O13 — auto-inject W3C trace context (traceparent / tracestate) from
+	 * SLF4J MDC into the structured CW log payload's `data` block. Lets
+	 * downstream observability tools correlate sub-query worker events to
+	 * the originating REST request without grep-on-queryId-then-grep-again.
+	 * Returns the metadata map verbatim (or a fresh map) with trace fields
+	 * added when present.
+	 */
+	private static Map<String, Object> traceContextMetadata(Map<String, Object> existing) {
+		String tp = org.slf4j.MDC.get("traceparent");
+		String ts = org.slf4j.MDC.get("tracestate");
+		if ((tp == null || tp.isEmpty()) && (ts == null || ts.isEmpty())) {
+			return existing;
+		}
+		Map<String, Object> out = (existing != null) ? new java.util.LinkedHashMap<>(existing) : new java.util.LinkedHashMap<>();
+		if (tp != null && !tp.isEmpty()) out.put("traceparent", tp);
+		if (ts != null && !ts.isEmpty()) out.put("tracestate", ts);
+		return out;
 	}
 
 	/**
@@ -1476,9 +1496,17 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				long minTimestamp = byteRange.minTimestamp;
 				long maxTimestamp = byteRange.maxTimestamp;
 
-				if ((queryOptions.queryFrom <= minTimestamp) &&
-					(queryOptions.queryTo    > maxTimestamp)) {
-					
+				// Intersection semantics: the byte range counts as "in the
+				// query's timeframe" if its [min, max] overlaps [from, to) at
+				// all. Previously required strict containment, which fluent-bit
+				// 10-minute blobs can never satisfy for 60s shard windows and
+				// so routed everything through outsideTimeframeRequest +
+				// per-event filter — adding unnecessary per-event work and
+				// depending on `(!this.timestamp)` short-circuits to admit
+				// events with no parsed timestamp.
+				if ((queryOptions.queryFrom <= maxTimestamp) &&
+					(queryOptions.queryTo    >  minTimestamp)) {
+
 					rangesInTimeframeStates[index] = true;
 					rangesInTimeframe++;
 				}
