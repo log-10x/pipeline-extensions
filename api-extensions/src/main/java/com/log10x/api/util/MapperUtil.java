@@ -29,14 +29,23 @@ public class MapperUtil {
 	public static TypeReference<Map<String, Object>> MAP_REF = 
 		new TypeReference<Map<String, Object>>() {};
 
-	public static <M extends ObjectMapper, B extends MapperBuilder<M,B>> 
+	public static <M extends ObjectMapper, B extends MapperBuilder<M,B>>
 		M initMapper(MapperBuilder<M, B> builder) {
-		
+
 			return builder.
-				visibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY).	
+				visibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY).
 				configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true).
 				enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS).
-				build();		
+				// Single-element list-typed CLI overrides arrive as a scalar
+				// string (one overrideKey/overrideValue pair carries one
+				// value at a time). Without this, deserializing a single
+				// string into a List<String> field — e.g.
+				// IndexQueryOptions.queryFilters — throws
+				// "Cannot construct ArrayList — no String-argument
+				// constructor". Coercion is one-way safe: real arrays still
+				// deserialize as arrays.
+				enable(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY).
+				build();
 	}
 	
 	public static final JsonMapper noFailUnknownJsonMapper = JsonMapper.builder()

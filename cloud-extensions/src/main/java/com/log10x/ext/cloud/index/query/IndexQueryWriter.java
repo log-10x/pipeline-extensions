@@ -266,8 +266,15 @@ public class IndexQueryWriter extends BaseIndexWriter {
 	 * added when present.
 	 */
 	private static Map<String, Object> traceContextMetadata(Map<String, Object> existing) {
+		// Read from both SLF4J MDC and log4j2 ThreadContext — different parts
+		// of the stack populate different stores (the pipeline runtime uses
+		// log4j2; HTTP/SQS request plumbing uses SLF4J). Prefer MDC when both
+		// are set (upstream-set HTTP header wins over anything the pipeline
+		// logger layered on top).
 		String tp = org.slf4j.MDC.get("traceparent");
+		if (tp == null || tp.isEmpty()) tp = org.apache.logging.log4j.ThreadContext.get("traceparent");
 		String ts = org.slf4j.MDC.get("tracestate");
+		if (ts == null || ts.isEmpty()) ts = org.apache.logging.log4j.ThreadContext.get("tracestate");
 		if ((tp == null || tp.isEmpty()) && (ts == null || ts.isEmpty())) {
 			return existing;
 		}
@@ -1168,7 +1175,34 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			logger.debug("scanTasks:" + scanTasks + ", threadPoolSize: " + threadPoolSize);
 		}
 
-		this.executorService = Executors.newFixedThreadPool(threadPoolSize);
+		// O13 — wrap the scan thread pool's threads so they inherit the
+		// caller's MDC + log4j2 ThreadContext (specifically traceparent /
+		// tracestate). Without this, each scan task runs with empty
+		// contexts, so log lines emitted from scan tasks don't carry trace
+		// context — breaking end-to-end correlation even though the
+		// coordinator thread had it. Both stores are independent; the
+		// pipeline runtime logs via log4j2 so that store is load-bearing
+		// for the %X{traceparent} pattern layout.
+		final java.util.Map<String, String> parentMdc = org.slf4j.MDC.getCopyOfContextMap();
+		final java.util.Map<String, String> parentLog4j =
+				org.apache.logging.log4j.ThreadContext.getImmutableContext();
+		java.util.concurrent.ThreadFactory tf = (r) -> {
+			Thread t = new Thread(() -> {
+				if (parentMdc != null) org.slf4j.MDC.setContextMap(parentMdc);
+				if (parentLog4j != null && !parentLog4j.isEmpty()) {
+					org.apache.logging.log4j.ThreadContext.putAll(parentLog4j);
+				}
+				try {
+					r.run();
+				} finally {
+					org.slf4j.MDC.clear();
+					org.apache.logging.log4j.ThreadContext.clearAll();
+				}
+			});
+			t.setDaemon(true);
+			return t;
+		};
+		this.executorService = Executors.newFixedThreadPool(threadPoolSize, tf);
 		
 		if (scanTasks > 1) {
 

@@ -1052,12 +1052,15 @@ public class AWSIndexAccess implements ObjectStorageIndexAccessor {
 	private void sqsSendMessage(String queueName, String body) {
 
 		// O13 — propagate W3C trace context across the SQS hop. If the
-		// current thread has a traceparent in MDC (set by the query-app's
-		// entry HTTP handler or by a prior sqsReceive), attach it as an
-		// SQS MessageAttribute so the consuming worker can resume the span.
-		// If absent, omit the attribute — receivers tolerate missing context.
+		// current thread has a traceparent set (log4j2 ThreadContext for the
+		// pipeline runtime, or SLF4J MDC for request plumbing), attach it
+		// as an SQS MessageAttribute so the consuming worker can resume the
+		// span. If absent, omit the attribute — receivers tolerate missing
+		// context.
 		String traceparent = org.apache.logging.log4j.ThreadContext.get("traceparent");
+		if (traceparent == null || traceparent.isEmpty()) traceparent = org.slf4j.MDC.get("traceparent");
 		String tracestate = org.apache.logging.log4j.ThreadContext.get("tracestate");
+		if (tracestate == null || tracestate.isEmpty()) tracestate = org.slf4j.MDC.get("tracestate");
 
 		SendMessageRequest.Builder builder = SendMessageRequest.builder()
 				.queueUrl(queueName)
