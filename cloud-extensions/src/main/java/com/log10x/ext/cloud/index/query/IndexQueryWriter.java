@@ -997,6 +997,58 @@ public class IndexQueryWriter extends BaseIndexWriter {
 							"streamBlobs", streamBlobs,
 							"submittedTasks", submittedTasks,
 							"reason", reason));
+
+				// R21 — write an atomic coordinator-level _DONE.json marker so
+				// programmatic consumers (log10x-mcp, batch callers) can poll
+				// S3 for a DETERMINISTIC completion signal instead of running a
+				// stability heuristic on the byte-count marker set. This runs
+				// only on the TOP-LEVEL coordinator invocation (the one that
+				// dispatches scan sub-queries via SQS) — recursive local scan
+				// sub-queries have timeslice==0 and must not write the marker.
+				//
+				// Path: {indexObjectPath(queryResults,target)}/{queryId}/_DONE.json
+				// Body: {queryId, completedAt, elapsedMs, reason, scanned, matched,
+				//        streamRequests, streamBlobs, submittedTasks, expectedMarkers}
+				// expectedMarkers = streamRequests  — one byte-count marker per stream
+				// dispatch; callers poll tenx/{target}/q/{qid}/ for that count.
+				//
+				// S3 strong read-after-write consistency guarantees the marker is
+				// visible the instant putObject returns, so MCP clients see "done"
+				// within one poll cycle (sub-second) instead of the ~25s Insights
+				// lag that R18 /status polling pays.
+				IndexQueryOptions qOpt = (IndexQueryOptions) this.options;
+				if (qOpt.queryScanFunctionParallelTimeslice > 0) {
+					try {
+						String qrBase = indexAccessor.indexObjectPath(IndexObjectType.queryResults, qOpt.queryTarget);
+						String donePrefix = (new StringBuilder(qrBase))
+								.append(indexAccessor.keyPathSeperator())
+								.append(this.queryId)
+								.toString();
+						Map<String, Object> doneBody = new LinkedHashMap<>();
+						doneBody.put("queryId", this.queryId);
+						doneBody.put("completedAt", System.currentTimeMillis());
+						doneBody.put("elapsedMs", elapsed);
+						doneBody.put("reason", reason);
+						doneBody.put("scanned", scanned);
+						doneBody.put("matched", matched);
+						doneBody.put("skippedSearch", skippedSearch);
+						doneBody.put("skippedTemplate", skippedTemplate);
+						doneBody.put("streamRequests", streamRequests);
+						doneBody.put("streamBlobs", streamBlobs);
+						doneBody.put("submittedTasks", submittedTasks);
+						doneBody.put("expectedMarkers", streamRequests);
+						byte[] bytes = MapperUtil.jsonMapper.writeValueAsBytes(doneBody);
+						indexAccessor.putObject(donePrefix, "_DONE.json",
+								new java.io.ByteArrayInputStream(bytes),
+								(long) bytes.length, null);
+					} catch (Exception e) {
+						// Best-effort: a failed marker write must not abort the
+						// coordinator close. Log and continue; legacy callers
+						// still have byte-count marker stability fallback.
+						logger.warn("failed to write _DONE.json marker for {}: {}",
+								this.queryId, e.toString());
+					}
+				}
 			}
 
 			this.closed = true;
