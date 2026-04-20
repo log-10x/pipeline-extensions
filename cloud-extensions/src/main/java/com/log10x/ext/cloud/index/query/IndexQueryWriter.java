@@ -10,6 +10,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.io.ByteArrayInputStream;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -20,12 +21,14 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.ThreadContext;
+import org.slf4j.MDC;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
@@ -258,30 +261,84 @@ public class IndexQueryWriter extends BaseIndexWriter {
 	}
 
 	/**
-	 * O13 — auto-inject W3C trace context (traceparent / tracestate) from
-	 * SLF4J MDC into the structured CW log payload's `data` block. Lets
-	 * downstream observability tools correlate sub-query worker events to
-	 * the originating REST request without grep-on-queryId-then-grep-again.
-	 * Returns the metadata map verbatim (or a fresh map) with trace fields
-	 * added when present.
+	 * Inject W3C trace context into the structured CW payload so sub-query
+	 * worker events correlate to the originating request. Reads SLF4J MDC
+	 * first (upstream HTTP-set value wins) then log4j2 ThreadContext.
 	 */
 	private static Map<String, Object> traceContextMetadata(Map<String, Object> existing) {
-		// Read from both SLF4J MDC and log4j2 ThreadContext — different parts
-		// of the stack populate different stores (the pipeline runtime uses
-		// log4j2; HTTP/SQS request plumbing uses SLF4J). Prefer MDC when both
-		// are set (upstream-set HTTP header wins over anything the pipeline
-		// logger layered on top).
-		String tp = org.slf4j.MDC.get("traceparent");
-		if (tp == null || tp.isEmpty()) tp = org.apache.logging.log4j.ThreadContext.get("traceparent");
-		String ts = org.slf4j.MDC.get("tracestate");
-		if (ts == null || ts.isEmpty()) ts = org.apache.logging.log4j.ThreadContext.get("tracestate");
-		if ((tp == null || tp.isEmpty()) && (ts == null || ts.isEmpty())) {
+
+		String tp = currentTrace("traceparent");
+		String ts = currentTrace("tracestate");
+
+		if (((tp == null) || (tp.isEmpty())) && ((ts == null) || (ts.isEmpty()))) {
 			return existing;
 		}
-		Map<String, Object> out = (existing != null) ? new java.util.LinkedHashMap<>(existing) : new java.util.LinkedHashMap<>();
-		if (tp != null && !tp.isEmpty()) out.put("traceparent", tp);
-		if (ts != null && !ts.isEmpty()) out.put("tracestate", ts);
+
+		Map<String, Object> out = (existing != null) ? new LinkedHashMap<>(existing) : new LinkedHashMap<>();
+
+		if ((tp != null) && (!tp.isEmpty())) {
+			out.put("traceparent", tp);
+		}
+
+		if ((ts != null) && (!ts.isEmpty())) {
+			out.put("tracestate", ts);
+		}
+
 		return out;
+	}
+
+	private static String currentTrace(String key) {
+
+		String v = MDC.get(key);
+
+		if ((v == null) || (v.isEmpty())) {
+			v = ThreadContext.get(key);
+		}
+
+		return v;
+	}
+
+	private static final String DONE_MARKER_KEY = "_DONE.json";
+
+	/**
+	 * Atomic coordinator completion marker. Consumers poll this key for a
+	 * deterministic completion signal; the body's {@code expectedMarkers}
+	 * tells them how many per-worker byte-count markers to wait for.
+	 * Best-effort — a failed write is logged but does not abort close.
+	 */
+	private void writeDoneMarker(IndexQueryOptions qOpt, long elapsed, String reason,
+			long scanned, long matched, long skippedSearch, long skippedTemplate,
+			long streamRequests, long streamBlobs, long submittedTasks) {
+
+		try {
+
+			String qrBase = indexAccessor.indexObjectPath(IndexObjectType.queryResults, qOpt.queryTarget);
+			String donePrefix = new StringBuilder(qrBase)
+					.append(indexAccessor.keyPathSeperator())
+					.append(this.queryId)
+					.toString();
+
+			Map<String, Object> doneBody = new LinkedHashMap<>();
+			doneBody.put("queryId", this.queryId);
+			doneBody.put("completedAt", System.currentTimeMillis());
+			doneBody.put("elapsedMs", elapsed);
+			doneBody.put("reason", reason);
+			doneBody.put("scanned", scanned);
+			doneBody.put("matched", matched);
+			doneBody.put("skippedSearch", skippedSearch);
+			doneBody.put("skippedTemplate", skippedTemplate);
+			doneBody.put("streamRequests", streamRequests);
+			doneBody.put("streamBlobs", streamBlobs);
+			doneBody.put("submittedTasks", submittedTasks);
+			doneBody.put("expectedMarkers", streamRequests);
+
+			byte[] bytes = MapperUtil.jsonMapper.writeValueAsBytes(doneBody);
+			indexAccessor.putObject(donePrefix, DONE_MARKER_KEY,
+					new ByteArrayInputStream(bytes), (long) bytes.length, null);
+
+		} catch (Exception e) {
+			logger.warn("failed to write {} marker for {}: {}", DONE_MARKER_KEY, this.queryId, e.toString());
+		}
 	}
 
 	/**
@@ -998,56 +1055,14 @@ public class IndexQueryWriter extends BaseIndexWriter {
 							"submittedTasks", submittedTasks,
 							"reason", reason));
 
-				// R21 — write an atomic coordinator-level _DONE.json marker so
-				// programmatic consumers (log10x-mcp, batch callers) can poll
-				// S3 for a DETERMINISTIC completion signal instead of running a
-				// stability heuristic on the byte-count marker set. This runs
-				// only on the TOP-LEVEL coordinator invocation (the one that
-				// dispatches scan sub-queries via SQS) — recursive local scan
-				// sub-queries have timeslice==0 and must not write the marker.
-				//
-				// Path: {indexObjectPath(queryResults,target)}/{queryId}/_DONE.json
-				// Body: {queryId, completedAt, elapsedMs, reason, scanned, matched,
-				//        streamRequests, streamBlobs, submittedTasks, expectedMarkers}
-				// expectedMarkers = streamRequests  — one byte-count marker per stream
-				// dispatch; callers poll tenx/{target}/q/{qid}/ for that count.
-				//
-				// S3 strong read-after-write consistency guarantees the marker is
-				// visible the instant putObject returns, so MCP clients see "done"
-				// within one poll cycle (sub-second) instead of the ~25s Insights
-				// lag that R18 /status polling pays.
+				// Top-level coordinator only (recursive local scan sub-queries
+				// run with timeslice=0 and must not emit the marker).
 				IndexQueryOptions qOpt = (IndexQueryOptions) this.options;
+
 				if (qOpt.queryScanFunctionParallelTimeslice > 0) {
-					try {
-						String qrBase = indexAccessor.indexObjectPath(IndexObjectType.queryResults, qOpt.queryTarget);
-						String donePrefix = (new StringBuilder(qrBase))
-								.append(indexAccessor.keyPathSeperator())
-								.append(this.queryId)
-								.toString();
-						Map<String, Object> doneBody = new LinkedHashMap<>();
-						doneBody.put("queryId", this.queryId);
-						doneBody.put("completedAt", System.currentTimeMillis());
-						doneBody.put("elapsedMs", elapsed);
-						doneBody.put("reason", reason);
-						doneBody.put("scanned", scanned);
-						doneBody.put("matched", matched);
-						doneBody.put("skippedSearch", skippedSearch);
-						doneBody.put("skippedTemplate", skippedTemplate);
-						doneBody.put("streamRequests", streamRequests);
-						doneBody.put("streamBlobs", streamBlobs);
-						doneBody.put("submittedTasks", submittedTasks);
-						doneBody.put("expectedMarkers", streamRequests);
-						byte[] bytes = MapperUtil.jsonMapper.writeValueAsBytes(doneBody);
-						indexAccessor.putObject(donePrefix, "_DONE.json",
-								new java.io.ByteArrayInputStream(bytes),
-								(long) bytes.length, null);
-					} catch (Exception e) {
-						// Best-effort: a failed marker write must not abort the
-						// coordinator close. Log and continue; legacy callers
-						// still have byte-count marker stability fallback.
-						logger.warn("failed to write _DONE.json marker for {}: {}",
-								this.queryId, e.toString());
-					}
+					writeDoneMarker(qOpt, elapsed, reason, scanned, matched,
+							skippedSearch, skippedTemplate, streamRequests,
+							streamBlobs, submittedTasks);
 				}
 			}
 
@@ -1227,33 +1242,36 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			logger.debug("scanTasks:" + scanTasks + ", threadPoolSize: " + threadPoolSize);
 		}
 
-		// O13 — wrap the scan thread pool's threads so they inherit the
-		// caller's MDC + log4j2 ThreadContext (specifically traceparent /
-		// tracestate). Without this, each scan task runs with empty
-		// contexts, so log lines emitted from scan tasks don't carry trace
-		// context — breaking end-to-end correlation even though the
-		// coordinator thread had it. Both stores are independent; the
-		// pipeline runtime logs via log4j2 so that store is load-bearing
-		// for the %X{traceparent} pattern layout.
-		final java.util.Map<String, String> parentMdc = org.slf4j.MDC.getCopyOfContextMap();
-		final java.util.Map<String, String> parentLog4j =
-				org.apache.logging.log4j.ThreadContext.getImmutableContext();
-		java.util.concurrent.ThreadFactory tf = (r) -> {
+		// Propagate caller trace context onto each scan thread. Both stores
+		// are independent; the pipeline runtime's pattern layout reads
+		// log4j2 ThreadContext.
+		final Map<String, String> parentMdc = MDC.getCopyOfContextMap();
+		final Map<String, String> parentLog4j = ThreadContext.getImmutableContext();
+
+		ThreadFactory tf = (r) -> {
+
 			Thread t = new Thread(() -> {
-				if (parentMdc != null) org.slf4j.MDC.setContextMap(parentMdc);
-				if (parentLog4j != null && !parentLog4j.isEmpty()) {
-					org.apache.logging.log4j.ThreadContext.putAll(parentLog4j);
+
+				if (parentMdc != null) {
+					MDC.setContextMap(parentMdc);
 				}
+
+				if ((parentLog4j != null) && (!parentLog4j.isEmpty())) {
+					ThreadContext.putAll(parentLog4j);
+				}
+
 				try {
 					r.run();
 				} finally {
-					org.slf4j.MDC.clear();
-					org.apache.logging.log4j.ThreadContext.clearAll();
+					MDC.clear();
+					ThreadContext.clearAll();
 				}
 			});
+
 			t.setDaemon(true);
 			return t;
 		};
+
 		this.executorService = Executors.newFixedThreadPool(threadPoolSize, tf);
 		
 		if (scanTasks > 1) {

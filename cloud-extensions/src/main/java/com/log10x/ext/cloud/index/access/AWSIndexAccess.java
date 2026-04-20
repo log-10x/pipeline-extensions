@@ -46,6 +46,8 @@ import java.util.stream.Collectors;
 import org.apache.http.client.utils.URIBuilder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.ThreadContext;
+import org.slf4j.MDC;
 import org.unbescape.xml.XmlEscape;
 
 import com.amazonaws.services.s3.sample.auth.AWS4SignerBase;
@@ -81,6 +83,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.Tag;
 import software.amazon.awssdk.services.s3.model.Tagging;
 import software.amazon.awssdk.services.sqs.SqsAsyncClient;
+import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 import software.amazon.awssdk.utils.SdkAutoCloseable;
@@ -1051,29 +1054,24 @@ public class AWSIndexAccess implements ObjectStorageIndexAccessor {
 
 	private void sqsSendMessage(String queueName, String body) {
 
-		// O13 — propagate W3C trace context across the SQS hop. If the
-		// current thread has a traceparent set (log4j2 ThreadContext for the
-		// pipeline runtime, or SLF4J MDC for request plumbing), attach it
-		// as an SQS MessageAttribute so the consuming worker can resume the
-		// span. If absent, omit the attribute — receivers tolerate missing
-		// context.
-		String traceparent = org.apache.logging.log4j.ThreadContext.get("traceparent");
-		if (traceparent == null || traceparent.isEmpty()) traceparent = org.slf4j.MDC.get("traceparent");
-		String tracestate = org.apache.logging.log4j.ThreadContext.get("tracestate");
-		if (tracestate == null || tracestate.isEmpty()) tracestate = org.slf4j.MDC.get("tracestate");
+		// Attach W3C trace context across the SQS hop. The pipeline runtime
+		// uses log4j2 ThreadContext; request plumbing uses SLF4J MDC.
+		String traceparent = currentTraceContext("traceparent");
+		String tracestate = currentTraceContext("tracestate");
 
 		SendMessageRequest.Builder builder = SendMessageRequest.builder()
 				.queueUrl(queueName)
 				.messageBody(body);
 
 		if ((traceparent != null) && (!traceparent.isEmpty())) {
-			java.util.Map<String, software.amazon.awssdk.services.sqs.model.MessageAttributeValue> attrs = new java.util.HashMap<>();
-			attrs.put("traceparent", software.amazon.awssdk.services.sqs.model.MessageAttributeValue.builder()
-				.dataType("String").stringValue(traceparent).build());
+
+			Map<String, MessageAttributeValue> attrs = new HashMap<>();
+			attrs.put("traceparent", stringAttribute(traceparent));
+
 			if ((tracestate != null) && (!tracestate.isEmpty())) {
-				attrs.put("tracestate", software.amazon.awssdk.services.sqs.model.MessageAttributeValue.builder()
-					.dataType("String").stringValue(tracestate).build());
+				attrs.put("tracestate", stringAttribute(tracestate));
 			}
+
 			builder.messageAttributes(attrs);
 		}
 
@@ -1095,6 +1093,21 @@ public class AWSIndexAccess implements ObjectStorageIndexAccessor {
 				});
 
 		this.trackAsyncRequest(future);
+	}
+
+	private static String currentTraceContext(String key) {
+
+		String v = ThreadContext.get(key);
+
+		if ((v == null) || (v.isEmpty())) {
+			v = MDC.get(key);
+		}
+
+		return v;
+	}
+
+	private static MessageAttributeValue stringAttribute(String value) {
+		return MessageAttributeValue.builder().dataType("String").stringValue(value).build();
 	}
 
 	@Override
