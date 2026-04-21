@@ -12,9 +12,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import com.log10x.api.eval.EvaluatorBean;
 import com.log10x.api.pipeline.launch.PipelineLaunchOptions;
 import com.log10x.api.util.MapperUtil;
+import static com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.MDC_QUERY_ID;
+
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.IndexObjectType;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.QueryLogLevel;
+import org.apache.logging.log4j.ThreadContext;
+
 import com.log10x.ext.cloud.index.shared.BaseIndexWriter;
 
 /**
@@ -68,6 +72,8 @@ public class IndexObjectQueryWriter extends BaseIndexWriter {
 		this.queryId = options.queryObjectID;
 		this.workerID = (String) evaluatorBean.env(PipelineLaunchOptions.UNIQUE_ID);
 		this.logLevels = options.queryObjectLogLevels;
+
+		ThreadContext.put(MDC_QUERY_ID, this.queryId);
 
 		this.utf8Sizes = new AtomicLong();
 		
@@ -145,6 +151,10 @@ public class IndexObjectQueryWriter extends BaseIndexWriter {
 			throw e;
 		}
 
-		super.close();
+		try {
+			super.close();
+		} finally {
+			ThreadContext.remove(MDC_QUERY_ID);
+		}
 	}
 }

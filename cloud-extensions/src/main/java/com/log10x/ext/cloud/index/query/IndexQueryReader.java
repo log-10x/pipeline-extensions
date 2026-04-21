@@ -13,6 +13,9 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.log10x.api.eval.EvaluatorBean;
 import com.log10x.api.util.MapperUtil;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import com.log10x.ext.cloud.index.query.QueryFilterEvaluator.Constant;
 import com.log10x.ext.cloud.index.shared.CompositeIndexReader;
 import com.log10x.ext.cloud.index.shared.template.IndexTemplateReader;
@@ -25,6 +28,8 @@ import com.log10x.ext.edge.util.StringBuilderReader;
  * {@link https://github.com/log-10x/modules/blob/main/pipelines/run/modules/input/objectStorage/query/stream.yaml# }
  */
 public class IndexQueryReader extends CompositeIndexReader {
+
+	private static final Logger logger = LogManager.getLogger(IndexQueryReader.class);
 
 	private static final String ENRICHMENT_VALUES = "enrichmentValues";
 	
@@ -119,6 +124,11 @@ public class IndexQueryReader extends CompositeIndexReader {
 			}
 
 			evaluatorBean.set("querySearch", templateTerms);
+
+			if (logger.isDebugEnabled()) {
+				logger.debug("createReaders: constants={}, templateTerms={}, eventTerms={}",
+					constants, templateTerms, eventTerms);
+			}
 
 			queryTermsReader = new StringBuilderReader(
 				String.join(

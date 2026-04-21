@@ -19,16 +19,19 @@ import com.log10x.ext.cloud.index.access.AWSIndexAccess;
  */
 public interface ObjectStorageIndexAccessor extends PipelineEndpointAccessor, ObjectStorageAccessor {
 
+	public static final String MDC_QUERY_ID = "queryId";
+
 	public static enum QueryLogLevel {
 		ERROR, INFO, DEBUG, PERF
 	}
 
 	public static enum IndexObjectType {
-		  
+
 		template("t"),
 		byteRange("b"),
 		reverseIndex("r"),
-		query("q");
+		query("q"),
+		queryResults("qr");
 		
 		public final String key;
 		

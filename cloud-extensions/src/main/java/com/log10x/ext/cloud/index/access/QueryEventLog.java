@@ -114,11 +114,14 @@ public class QueryEventLog {
 		json.append("{\"level\":\"").append(level.name())
 			.append("\",\"message\":\"").append(escapeJson(message)).append('"');
 
+		// Always emit queryId + workerId as first-class data fields so CW
+		// FilterLogEvents can match on them without listing streams first.
+		json.append(",\"data\":{\"queryId\":\"").append(escapeJson(queryID))
+			.append("\",\"workerId\":\"").append(escapeJson(workerID)).append('"');
+
 		if (metadata != null && !metadata.isEmpty()) {
-			json.append(",\"data\":{");
-			boolean first = true;
 			for (Map.Entry<String, Object> e : metadata.entrySet()) {
-				if (!first) json.append(',');
+				json.append(',');
 				json.append('"').append(escapeJson(e.getKey())).append("\":");
 				Object v = e.getValue();
 				if (v instanceof Number) {
@@ -126,11 +129,9 @@ public class QueryEventLog {
 				} else {
 					json.append('"').append(escapeJson(String.valueOf(v))).append('"');
 				}
-				first = false;
 			}
-			json.append('}');
 		}
-		json.append('}');
+		json.append("}}");
 
 		buffer.events.add(InputLogEvent.builder()
 				.timestamp(System.currentTimeMillis())
