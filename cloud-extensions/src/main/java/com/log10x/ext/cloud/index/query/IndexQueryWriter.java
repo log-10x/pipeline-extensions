@@ -10,6 +10,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.io.ByteArrayInputStream;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -20,10 +21,14 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.ThreadContext;
+import org.slf4j.MDC;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
@@ -33,6 +38,8 @@ import com.log10x.api.pipeline.launch.PipelineLaunchOptions;
 import com.log10x.api.util.MapperUtil;
 import com.log10x.ext.cloud.index.client.IndexQueryClient;
 import com.log10x.ext.cloud.index.filter.DecodedBloomFilter;
+import static com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.MDC_QUERY_ID;
+
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.IndexObjectType;
 import com.log10x.ext.cloud.index.interfaces.ObjectStorageIndexAccessor.QueryLogLevel;
@@ -218,6 +225,22 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 	private long queryStartTime;
 
+	// Aggregate scan counters (summed across all IterateIndexObjectsTask runs for this writer).
+	// Used to emit a per-query 'scan summary' event and to enrich 'query complete' with
+	// actionable classification data — distinguishes 0-result queries whose Bloom scans
+	// ran but matched nothing (bloom-miss) from queries whose index range returned no blobs
+	// (stale-indexer / empty-range).
+	private final AtomicLong aggScanned = new AtomicLong();
+	private final AtomicLong aggMatched = new AtomicLong();
+	private final AtomicLong aggSkippedSearch = new AtomicLong();
+	private final AtomicLong aggSkippedTemplate = new AtomicLong();
+	private final AtomicLong aggSkippedDuplicate = new AtomicLong();
+	private final AtomicLong aggSubmittedTasks = new AtomicLong();
+	private final AtomicLong aggSubmittedKeys = new AtomicLong();
+	private final AtomicLong aggStreamRequests = new AtomicLong();
+	private final AtomicLong aggStreamObjects = new AtomicLong();
+	private final AtomicLong aggStreamBlobs = new AtomicLong();
+
 	private boolean shouldLog(QueryLogLevel level) {
 		IndexQueryOptions opts = (IndexQueryOptions) this.options;
 		List<String> levels = opts.queryLogLevels();
@@ -229,12 +252,93 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 	private void logQuery(QueryLogLevel level, String message) {
 		if (!shouldLog(level)) return;
-		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, null);
+		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, traceContextMetadata(null));
 	}
 
 	private void logQuery(QueryLogLevel level, String message, Map<String, Object> metadata) {
 		if (!shouldLog(level)) return;
-		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, metadata);
+		this.indexAccessor.logQueryEvent(this.queryId, this.basePipelineUuid, level, message, traceContextMetadata(metadata));
+	}
+
+	/**
+	 * Inject W3C trace context into the structured CW payload so sub-query
+	 * worker events correlate to the originating request. Reads SLF4J MDC
+	 * first (upstream HTTP-set value wins) then log4j2 ThreadContext.
+	 */
+	private static Map<String, Object> traceContextMetadata(Map<String, Object> existing) {
+
+		String tp = currentTrace("traceparent");
+		String ts = currentTrace("tracestate");
+
+		if (((tp == null) || (tp.isEmpty())) && ((ts == null) || (ts.isEmpty()))) {
+			return existing;
+		}
+
+		Map<String, Object> out = (existing != null) ? new LinkedHashMap<>(existing) : new LinkedHashMap<>();
+
+		if ((tp != null) && (!tp.isEmpty())) {
+			out.put("traceparent", tp);
+		}
+
+		if ((ts != null) && (!ts.isEmpty())) {
+			out.put("tracestate", ts);
+		}
+
+		return out;
+	}
+
+	private static String currentTrace(String key) {
+
+		String v = MDC.get(key);
+
+		if ((v == null) || (v.isEmpty())) {
+			v = ThreadContext.get(key);
+		}
+
+		return v;
+	}
+
+	private static final String DONE_MARKER_KEY = "_DONE.json";
+
+	/**
+	 * Atomic coordinator completion marker. Consumers poll this key for a
+	 * deterministic completion signal; the body's {@code expectedMarkers}
+	 * tells them how many per-worker byte-count markers to wait for.
+	 * Best-effort — a failed write is logged but does not abort close.
+	 */
+	private void writeDoneMarker(IndexQueryOptions qOpt, long elapsed, String reason,
+			long scanned, long matched, long skippedSearch, long skippedTemplate,
+			long streamRequests, long streamBlobs, long submittedTasks) {
+
+		try {
+
+			String qrBase = indexAccessor.indexObjectPath(IndexObjectType.queryResults, qOpt.queryTarget);
+			String donePrefix = new StringBuilder(qrBase)
+					.append(indexAccessor.keyPathSeperator())
+					.append(this.queryId)
+					.toString();
+
+			Map<String, Object> doneBody = new LinkedHashMap<>();
+			doneBody.put("queryId", this.queryId);
+			doneBody.put("completedAt", System.currentTimeMillis());
+			doneBody.put("elapsedMs", elapsed);
+			doneBody.put("reason", reason);
+			doneBody.put("scanned", scanned);
+			doneBody.put("matched", matched);
+			doneBody.put("skippedSearch", skippedSearch);
+			doneBody.put("skippedTemplate", skippedTemplate);
+			doneBody.put("streamRequests", streamRequests);
+			doneBody.put("streamBlobs", streamBlobs);
+			doneBody.put("submittedTasks", submittedTasks);
+			doneBody.put("expectedMarkers", streamRequests);
+
+			byte[] bytes = MapperUtil.jsonMapper.writeValueAsBytes(doneBody);
+			indexAccessor.putObject(donePrefix, DONE_MARKER_KEY,
+					new ByteArrayInputStream(bytes), (long) bytes.length, null);
+
+		} catch (Exception e) {
+			logger.warn("failed to write {} marker for {}: {}", DONE_MARKER_KEY, this.queryId, e.toString());
+		}
 	}
 
 	/**
@@ -260,23 +364,33 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		ObjectStorageIndexAccessor indexAccessor, EvaluatorBean evaluatorBean) {
 
 		super(options, indexAccessor, evaluatorBean);
-		
+
 		validateOptions(options);
-		
+
 		this.currInputValue = new IndexQueryEvent();
-		
+
 		this.templateHashes = new HashSet<String>(options.queryFilterTemplateHashes);
-		
+
 		this.vars = new ArrayList<>(options.queryFilterVars.size());
-		
+
 		for (String queryFilterVar : options.queryFilterVars) {
 			vars.add(Arrays.asList(queryFilterVar.split(VAR_SEPERATOR)));
 		}
-				
+
 		this.queryId = (options.queryId != null && !options.queryId.isBlank()) ?
 			options.queryId :
 			UUID.randomUUID().toString();
-		
+
+		if (logger.isDebugEnabled()) {
+			logger.debug("query init: search={}, filterVars={}, filterTemplateHashes={}, queryId={}",
+				options.querySearch,
+				options.queryFilterVars != null ? options.queryFilterVars.size() : 0,
+				options.queryFilterTemplateHashes != null ? options.queryFilterTemplateHashes.size() : 0,
+				this.queryId);
+		}
+
+		ThreadContext.put(MDC_QUERY_ID, this.queryId);
+
 		if (options.queryLimitProcessingTime != 0) {
 		
 			this.queryElapseTime =  (options.queryElapseTime != 0) ?
@@ -386,19 +500,22 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 				if ((currInputValue.enrichmentValues != null) &&
 					(currInputValue.enrichmentValues.length > 0)) {
-					
+
 					for (String enrichmentValue : currInputValue.enrichmentValues) {
-						
+
 						this.tokenSplitter.fill(enrichmentValue, inputVars);
 					}
-				} else {
-					
+				} else if (currInputValue.vars != null) {
+
 					for (Object rawVar : currInputValue.vars) {
 
 						String stringVar = rawVar.toString();
 
 						inputVars.add(stringVar);
 					}
+				} else if (logger.isDebugEnabled()) {
+					logger.debug("flush: no templateHash, enrichmentValues, or vars. raw={}",
+						this.currChars.builder.toString().substring(0, Math.min(200, this.currChars.builder.length())));
 				}
 
 				vars.add(inputVars);
@@ -425,16 +542,25 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 		@Override
 		public Boolean apply(Integer index) {
-			
+
+			if (index >= vars.size()) {
+				logger.warn("BloomFilter.apply: index {} >= vars.size {}",  index, vars.size());
+				return false;
+			}
+
 			List<String> indexVars = vars.get(index);
-			
+
 			for (String indexVar : indexVars) {
-				
+
 				if (!this.test(indexVar)) {
 					return false;
-				}					
+				}
 			}
-			
+
+			if (indexVars.isEmpty() && logger.isDebugEnabled()) {
+				logger.debug("BloomFilter.apply: empty vars at index={}, returning true (vacuous)", index);
+			}
+
 			return true;
 		}		
 	}
@@ -507,27 +633,50 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				lastEpoch = epochValue;
 				
 				String encodedFilter = key.encodedFilter;
-				
+
 				IndexDecodedBloomFilter filter = new IndexDecodedBloomFilter(encodedFilter);
-				
+
 				if ((eval != null) &&
 					(!eval.evaluate(filter))) {
 
 					skippedSearchFilter++;
+					// #1 Per-blob bloom decision. DEBUG-gated so default runs stay
+					// quiet. Escalate via queryLogLevels=[...,DEBUG] to discover
+					// WHICH blobs passed/failed which filter — the difference
+					// between "Bloom rejected every value" and "Bloom matched N"
+					// that the aggregate counters collapse today.
+					logQuery(QueryLogLevel.DEBUG,
+						String.format("bloom tested: blob=%s, decision=skippedSearch, epoch=%d",
+							indexObjectKey, epochValue),
+						Map.of("blobKey", indexObjectKey, "epoch", epochValue,
+							"decision", "skippedSearch",
+							"templateHashesChecked", this.templateHashes.size()));
 					continue;
 				}
-						
+
 				if ((!templateHashes.isEmpty()) &&
 					(!filter.testAny(this.templateHashes))) {
 
 					skippedTemplateHash++;
+					logQuery(QueryLogLevel.DEBUG,
+						String.format("bloom tested: blob=%s, decision=skippedTemplate, epoch=%d",
+							indexObjectKey, epochValue),
+						Map.of("blobKey", indexObjectKey, "epoch", epochValue,
+							"decision", "skippedTemplate",
+							"templateHashesChecked", this.templateHashes.size()));
 					continue;
 				}
-				
+
 				TargetObjectByteRangeIndex blobByteRangeIndex;
-				
+
 				matchedKeys++;
 				localLubmittedKeyHashes.add(submitHash);
+				logQuery(QueryLogLevel.DEBUG,
+					String.format("bloom tested: blob=%s, decision=matched, epoch=%d",
+						indexObjectKey, epochValue),
+					Map.of("blobKey", indexObjectKey, "epoch", epochValue,
+						"decision", "matched",
+						"templateHashesChecked", this.templateHashes.size()));
 
 				synchronized (this.keyHashesLock) {
 					
@@ -567,7 +716,13 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		
 		this.submitMatchingByteRanges(output);
 
-		logQuery(QueryLogLevel.DEBUG,
+		aggScanned.addAndGet(scannedKeys);
+		aggMatched.addAndGet(matchedKeys);
+		aggSkippedDuplicate.addAndGet(skippedDuplicate);
+		aggSkippedSearch.addAndGet(skippedSearchFilter);
+		aggSkippedTemplate.addAndGet(skippedTemplateHash);
+
+		logQuery(QueryLogLevel.PERF,
 			String.format("scan complete: scanned=%d, matched=%d, skippedDuplicate=%d, skippedSearch=%d, skippedTemplate=%d",
 				scannedKeys, matchedKeys, skippedDuplicate, skippedSearchFilter, skippedTemplateHash),
 			Map.of("scanned", scannedKeys, "matched", matchedKeys,
@@ -645,11 +800,24 @@ public class IndexQueryWriter extends BaseIndexWriter {
 		}
 
 		if (logger.isDebugEnabled()) {
-			
+
 			logger.debug("submitted {} iter index objects tasks, from {} -> to {} ({} keys)",
 					submittedTasks, fromEpoch, toEpoch, submittedKeys);
 		}
-		
+
+		aggSubmittedTasks.addAndGet(submittedTasks);
+		aggSubmittedKeys.addAndGet(submittedKeys);
+
+		// Always emit a range-level summary — critical for diagnosing "0 events" queries.
+		// When submittedTasks=0, no IterateIndexObjectsTask will run, so 'scan complete'
+		// would never fire; without this line the CW trace for an empty-range query has no
+		// signal distinguishing "index prefix empty" from "scan found no matches".
+		logQuery(QueryLogLevel.INFO,
+				String.format("scan range: fromEpoch=%d, toEpoch=%d, submittedTasks=%d, submittedKeys=%d",
+				fromEpoch, toEpoch, submittedTasks, submittedKeys),
+				Map.of("fromEpoch", fromEpoch, "toEpoch", toEpoch,
+						"submittedTasks", submittedTasks, "submittedKeys", submittedKeys));
+
 		return submittedKeys;
 	}
 	
@@ -676,6 +844,10 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			totalObjects += req.queryObject.size();
 		}
 
+		aggStreamRequests.addAndGet(requests.size());
+		aggStreamObjects.addAndGet(totalObjects);
+		aggStreamBlobs.addAndGet(byteRanges.size());
+
 		logQuery(QueryLogLevel.PERF,
 				String.format("stream dispatch: %d requests, %d objects, %d target blobs",
 				requests.size(), totalObjects, byteRanges.size()),
@@ -690,6 +862,31 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			PipelineLaunchRequest streamRequest = PipelineLaunchRequest.newBuilder()
 					.withBootstrapArg(PipelineLaunchOptions.PARENT_ID, this.basePipelineUuid)
 					.build();
+
+			// #2 Per stream-request assembly. Lets us see what byte ranges the
+			// coordinator actually generated per dispatched request — degenerate
+			// ranges (0-length, duplicate, unaligned) would explain the
+			// "stream worker complete: fetched 0 bytes" symptom we see today.
+			if (shouldLog(QueryLogLevel.DEBUG)) {
+				int rangeCount = 0;
+				long totalRangeBytes = 0;
+				for (QueryObjectOptions qoo : request.queryObject) {
+					if (qoo.byteRanges != null) {
+						rangeCount += qoo.byteRanges.length / 2;
+						for (int i = 1; i < qoo.byteRanges.length; i += 2) {
+							totalRangeBytes += qoo.byteRanges[i];
+						}
+					}
+				}
+				String firstTarget = request.queryObject.isEmpty() ? "none" : request.queryObject.get(0).target;
+				logQuery(QueryLogLevel.DEBUG,
+					String.format("stream request: target=%s, objects=%d, byteRanges=%d, totalBytes=%d",
+						firstTarget, request.queryObject.size(), rangeCount, totalRangeBytes),
+					Map.of("target", firstTarget,
+						"objects", request.queryObject.size(),
+						"byteRanges", rangeCount,
+						"totalBytes", totalRangeBytes));
+			}
 
 			streamFunctionClient.send(streamRequest, request, STREAM);
 		}
@@ -820,15 +1017,63 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 			if (this.queryStartTime != 0) {
 				long elapsed = System.currentTimeMillis() - this.queryStartTime;
+				long scanned = aggScanned.get();
+				long matched = aggMatched.get();
+				long skippedSearch = aggSkippedSearch.get();
+				long skippedTemplate = aggSkippedTemplate.get();
+				long streamRequests = aggStreamRequests.get();
+				long streamBlobs = aggStreamBlobs.get();
+				long submittedTasks = aggSubmittedTasks.get();
+
+				// Classification reason — enum consumed by MCP streamer-diagnostics to
+				// distinguish 'we scanned and matched' vs the 3 distinct 0-result paths.
+				String reason;
+				if (matched > 0 && streamRequests > 0) {
+					reason = "success";
+				} else if (submittedTasks == 0) {
+					reason = "empty-range";       // index prefix had no blobs for this window
+				} else if (scanned > 0 && matched == 0) {
+					reason = "bloom-miss";        // Bloom scans ran, zero matched
+				} else if (matched > 0 && streamRequests == 0) {
+					reason = "match-no-dispatch"; // matched but no stream requests dispatched
+				} else {
+					reason = "unknown";
+				}
+
 				logQuery(QueryLogLevel.PERF,
-						String.format("query complete: elapsed=%dms", elapsed),
-						Map.of("elapsedMs", elapsed));
+						String.format("query complete: elapsed=%dms, scanned=%d, matched=%d, " +
+							"skippedSearch=%d, skippedTemplate=%d, streamRequests=%d, streamBlobs=%d, reason=%s",
+							elapsed, scanned, matched, skippedSearch, skippedTemplate,
+							streamRequests, streamBlobs, reason),
+						Map.of("elapsedMs", elapsed,
+							"scanned", scanned,
+							"matched", matched,
+							"skippedSearch", skippedSearch,
+							"skippedTemplate", skippedTemplate,
+							"streamRequests", streamRequests,
+							"streamBlobs", streamBlobs,
+							"submittedTasks", submittedTasks,
+							"reason", reason));
+
+				// Top-level coordinator only (recursive local scan sub-queries
+				// run with timeslice=0 and must not emit the marker).
+				IndexQueryOptions qOpt = (IndexQueryOptions) this.options;
+
+				if (qOpt.queryScanFunctionParallelTimeslice > 0) {
+					writeDoneMarker(qOpt, elapsed, reason, scanned, matched,
+							skippedSearch, skippedTemplate, streamRequests,
+							streamBlobs, submittedTasks);
+				}
 			}
 
 			this.closed = true;
 		}
 
-		super.close();
+		try {
+			super.close();
+		} finally {
+			ThreadContext.remove(MDC_QUERY_ID);
+		}
 	}
 
 	private boolean isEmptyQuery() {
@@ -850,8 +1095,12 @@ public class IndexQueryWriter extends BaseIndexWriter {
 	private void submitQuery() {
 
 		if (isEmptyQuery()) {
-			logger.warn("No matching template hashes or vars, not submitting empty query");
-			logQuery(QueryLogLevel.DEBUG, "query empty: no matching template hashes or vars");
+			logQuery(QueryLogLevel.INFO,
+				String.format("query empty: no matching template hashes or vars (templateHashes=%d, vars=%d)",
+					this.templateHashes.size(), this.vars.size()),
+				Map.of("reason", "no_template_hashes_or_vars",
+					"templateHashCount", this.templateHashes.size(),
+					"varsCount", this.vars.size()));
 			return;
 		}
 
@@ -873,10 +1122,20 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				options.queryFrom, options.queryTo, queryRange,
 				options.queryLimitProcessingTime, options.queryLimitResultSize));
 
+		boolean isRemoteDispatch = (this.timeslice != 0) && (this.timeslice < queryRange);
+
+		logQuery(QueryLogLevel.INFO,
+				String.format("query plan: templateHashes=%d, vars=%d, timeslice=%dms, dispatch=%s",
+				this.templateHashes.size(), this.vars.size(), this.timeslice,
+				isRemoteDispatch ? "remote" : "local"),
+				Map.of("templateHashes", this.templateHashes.size(),
+					"vars", this.vars.size(),
+					"timeslice", this.timeslice,
+					"dispatch", isRemoteDispatch ? "remote" : "local"));
+
 		try {
 
-			if ((this.timeslice != 0) &&
-				(this.timeslice < queryRange)) {
+			if (isRemoteDispatch) {
 
 				this.submitToEndpoint();
 
@@ -936,8 +1195,9 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				options.queryStreamFunctionParallelByteRange,
 				options.queryStreamFunctionUrl,
 				options.queryLogLevels,
-				options.queryLogGroup);
-		
+				options.queryLogGroup,
+				options.queryWriteResults);
+
 		do {
 
 			if (this.queryElapsed(false)) {
@@ -982,7 +1242,37 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			logger.debug("scanTasks:" + scanTasks + ", threadPoolSize: " + threadPoolSize);
 		}
 
-		this.executorService = Executors.newFixedThreadPool(threadPoolSize);
+		// Propagate caller trace context onto each scan thread. Both stores
+		// are independent; the pipeline runtime's pattern layout reads
+		// log4j2 ThreadContext.
+		final Map<String, String> parentMdc = MDC.getCopyOfContextMap();
+		final Map<String, String> parentLog4j = ThreadContext.getImmutableContext();
+
+		ThreadFactory tf = (r) -> {
+
+			Thread t = new Thread(() -> {
+
+				if (parentMdc != null) {
+					MDC.setContextMap(parentMdc);
+				}
+
+				if ((parentLog4j != null) && (!parentLog4j.isEmpty())) {
+					ThreadContext.putAll(parentLog4j);
+				}
+
+				try {
+					r.run();
+				} finally {
+					MDC.clear();
+					ThreadContext.clearAll();
+				}
+			});
+
+			t.setDaemon(true);
+			return t;
+		};
+
+		this.executorService = Executors.newFixedThreadPool(threadPoolSize, tf);
 		
 		if (scanTasks > 1) {
 
@@ -1283,7 +1573,8 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				(filterTimestamps) ? queryOptions.queryFrom : 0,
 				(filterTimestamps) ? queryOptions.queryTo : 0,
 				new long[byteRangeSize * 2], this.queryId, this.queryElapseTime,
-				queryOptions.queryLogLevels(), queryOptions.queryLogGroup);
+				queryOptions.queryLogLevels(), queryOptions.queryLogGroup,
+				queryOptions.queryWriteResults);
 	}
 	
 	private List<QueryObjectOptions> createObjectRequests(Map<String, Set<TimestampByteRange>> targetObjects) {
@@ -1309,9 +1600,17 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				long minTimestamp = byteRange.minTimestamp;
 				long maxTimestamp = byteRange.maxTimestamp;
 
-				if ((queryOptions.queryFrom <= minTimestamp) &&
-					(queryOptions.queryTo    > maxTimestamp)) {
-					
+				// Intersection semantics: the byte range counts as "in the
+				// query's timeframe" if its [min, max] overlaps [from, to) at
+				// all. Previously required strict containment, which fluent-bit
+				// 10-minute blobs can never satisfy for 60s shard windows and
+				// so routed everything through outsideTimeframeRequest +
+				// per-event filter — adding unnecessary per-event work and
+				// depending on `(!this.timestamp)` short-circuits to admit
+				// events with no parsed timestamp.
+				if ((queryOptions.queryFrom <= maxTimestamp) &&
+					(queryOptions.queryTo    >  minTimestamp)) {
+
 					rangesInTimeframeStates[index] = true;
 					rangesInTimeframe++;
 				}

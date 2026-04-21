@@ -29,14 +29,18 @@ public class MapperUtil {
 	public static TypeReference<Map<String, Object>> MAP_REF = 
 		new TypeReference<Map<String, Object>>() {};
 
-	public static <M extends ObjectMapper, B extends MapperBuilder<M,B>> 
+	public static <M extends ObjectMapper, B extends MapperBuilder<M,B>>
 		M initMapper(MapperBuilder<M, B> builder) {
-		
+
 			return builder.
-				visibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY).	
+				visibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY).
 				configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true).
 				enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS).
-				build();		
+				// Coerce scalar values into single-element List<T> so CLI
+				// overrides that pass one value at a time deserialize into
+				// list-typed fields.
+				enable(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY).
+				build();
 	}
 	
 	public static final JsonMapper noFailUnknownJsonMapper = JsonMapper.builder()

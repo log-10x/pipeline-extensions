@@ -8,6 +8,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import com.log10x.ext.cloud.index.shared.TokenSplitter;
 import com.signalfx.shaded.google.common.base.Utf8;
 
@@ -22,7 +25,9 @@ import orestes.bloomfilter.FilterBuilder;
  * This class in NOT thread-safe.
  */
 public class EncodedBloomFilterBuilder {
-		
+
+	private static final Logger logger = LogManager.getLogger(EncodedBloomFilterBuilder.class);
+
 	public static final boolean DEBUG = true;
 		
 	private final static int MIN_ITEMS = 10000;
@@ -201,22 +206,25 @@ public class EncodedBloomFilterBuilder {
 			epoch;
 		
 		this.appendValue(output.templateHash, false);
-				
+
 		if (output.vars != null) {
-			
+
 			for (Object var : output.vars) {
-				this.appendValue(var, false);	
+				this.appendValue(var, false);
 			}
 		}
-		
+
 		if (output.enrichmentFields != null) {
-		
+
 			for (Object enrichmentValue : output.enrichmentFields.values()) {
-				
+
 				this.appendValue(enrichmentValue, true);
 			}
+		} else if (logger.isDebugEnabled()) {
+			logger.debug("append: enrichmentFields=null, templateHash={}, vars={}",
+				output.templateHash, output.vars != null ? output.vars.length : 0);
 		}
-				
+
 		int size = valueSet.size();
 		
 		int stepCheck = (size - MIN_ITEMS) % STEP_CHECK_FULL;

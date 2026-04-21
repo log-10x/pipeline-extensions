@@ -279,6 +279,72 @@ public class GeoQueryReader extends BaseIndexReader {
 - [Access Layer](../access/README.md) — Storage backends
 - [Utilities](../util/README.md) — Stream and buffer utilities
 
+## Completion Signalling — `_DONE.json` (R21)
+
+The top-level coordinator writes an atomic JSON marker the instant it
+finishes dispatching sub-queries, so programmatic consumers (log10x-mcp,
+batch callers) get a **sub-second deterministic completion signal**
+instead of polling R18 or running a stability heuristic on the
+byte-count markers.
+
+**Where:**
+
+```
+{indexObjectPath(queryResults, target)}/{queryId}/_DONE.json
+```
+
+On the demo-env bucket, this resolves to:
+
+```
+s3://{bucket}/{indexSubpath}/tenx/{target}/qr/{queryId}/_DONE.json
+```
+
+**Body (all fields UTF-8 JSON, stable schema):**
+
+```json
+{
+  "queryId": "...",
+  "completedAt": 1776700541264,
+  "elapsedMs": 14,
+  "reason": "success|empty-range|bloom-miss|match-no-dispatch|unknown|aborted",
+  "scanned": 94,
+  "matched": 1,
+  "skippedSearch": 92,
+  "skippedTemplate": 0,
+  "streamRequests": 1,
+  "streamBlobs": 1,
+  "submittedTasks": 12,
+  "expectedMarkers": 1
+}
+```
+
+**When written:** only by the top-level coordinator invocation
+(identified by `options.queryScanFunctionParallelTimeslice > 0`).
+Recursive local scan sub-queries that share the same qid correctly do
+**not** write the marker.
+
+**Consumer contract:**
+
+1. Submit query with `writeResults: true`.
+2. Poll `HEAD s3://.../_DONE.json`. S3 strong read-after-write means the
+   GET succeeds the instant the coordinator's `putObject` returns
+   (measured 1.05s lag on demo-env, 2026-04-20).
+3. Read the body. `expectedMarkers` tells you exactly how many
+   byte-count markers (workers) to wait for before considering results
+   fully written.
+4. If `writeResults: true`, poll
+   `{indexObjectPath(query,target)}/{queryId}/` until object count ≥
+   `expectedMarkers`. Only then read `qr/{queryId}/*.jsonl` payloads.
+
+**Fallback for legacy streamers (pre-R21):** if `_DONE.json` never
+appears within a budget, fall back to the pre-R21 byte-count-marker
+stability heuristic (two consecutive polls returning the same set).
+log10x-mcp's `runStreamerQuery` already implements this fallback.
+
+**Best-effort write:** the coordinator swallows any `putObject` failure
+and logs a warn so a transient S3 error does not abort the coordinator's
+close path.
+
 ---
 
 Enterprise-grade query execution for cloud-stored log data.

@@ -45,6 +45,8 @@ public class IndexQueryObjectOptions implements QueryObjectRequest {
 
 	public final String queryObjectLogGroup;
 
+	public final boolean queryObjectWriteResults;
+
 	private transient int currByteRangeIndex;
 
 	public IndexQueryObjectOptions(String queryObjectQueryName, String queryObjectObjectStorageName,
@@ -52,7 +54,7 @@ public class IndexQueryObjectOptions implements QueryObjectRequest {
 			String queryObjectFilter, String queryObjectTarget, String queryObjectTargetObject,
 			boolean queryObjectPrintProgress, long queryObjectFrom, long queryObjectTo, long[] queryObjectByteRanges,
 			String queryObjectID, long queryObjectElapseTime, List<String> queryObjectLogLevels,
-			String queryObjectLogGroup) {
+			String queryObjectLogGroup, boolean queryObjectWriteResults) {
 
 		this.queryObjectQueryName = queryObjectQueryName;
 		this.queryObjectObjectStorageName = queryObjectObjectStorageName;
@@ -72,12 +74,14 @@ public class IndexQueryObjectOptions implements QueryObjectRequest {
 		this.queryObjectElapseTime = queryObjectElapseTime;
 		this.queryObjectLogLevels = queryObjectLogLevels;
 		this.queryObjectLogGroup = queryObjectLogGroup;
+
+		this.queryObjectWriteResults = queryObjectWriteResults;
 	}
 
 	public IndexQueryObjectOptions() {
 
 		this(null, null, new ArrayList<>(), null, null, null,
-			null, null, true, 0, 0, null, null, 0, null, null);
+			null, null, true, 0, 0, null, null, 0, null, null, false);
 	}
 
 	@Override

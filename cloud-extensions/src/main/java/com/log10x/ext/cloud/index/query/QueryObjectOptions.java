@@ -48,12 +48,14 @@ public class QueryObjectOptions implements QueryObjectRequest {
 
 	public final String logGroup;
 
+	public final boolean writeResults;
+
 	private transient int currByteRangeIndex;
 
 	public QueryObjectOptions(String queryName, String objectStorageName, List<String> objectStorageArgs,
 			String filter, String target, String targetObject, String container, String indexContainer,
 			long from, long to, long[] byteRanges, String ID, long elapseTime,
-			List<String> logLevels, String logGroup) {
+			List<String> logLevels, String logGroup, boolean writeResults) {
 
 		this.queryName = queryName;
 		this.objectStorageName = objectStorageName;
@@ -73,19 +75,22 @@ public class QueryObjectOptions implements QueryObjectRequest {
 		this.elapseTime = elapseTime;
 		this.logLevels = logLevels;
 		this.logGroup = logGroup;
+
+		this.writeResults = writeResults;
 	}
 
-	public QueryObjectOptions(QueryObjectRequest other, int segmentSize) {
+	public QueryObjectOptions(QueryObjectRequest other, int segmentSize, boolean writeResults) {
 
 		this(other.name(), other.accessorAlias(), ArgsUtil.toList(other.args()),
 			other.filter(), other.target(), other.inputObject(),
 			other.inputContainer(), other.indexContainer(),
 			other.from(), other.to(), new long [segmentSize * 2],
-			other.ID(), other.elapseTime(), other.queryLogLevels(), other.queryLogGroup());
+			other.ID(), other.elapseTime(), other.queryLogLevels(), other.queryLogGroup(),
+			writeResults);
 	}
 
 	public QueryObjectOptions() {
-		this(null, null, new ArrayList<>(), null, null, null, null, null, 0, 0, null, null, 0, null, null);
+		this(null, null, new ArrayList<>(), null, null, null, null, null, 0, 0, null, null, 0, null, null, false);
 	}
 	
 	@Override
@@ -160,8 +165,8 @@ public class QueryObjectOptions implements QueryObjectRequest {
 	public QueryObjectOptions subOptions(int from, int to) {
 
 		int size = to - from;
-		
-		QueryObjectOptions result = new QueryObjectOptions(this, size);
+
+		QueryObjectOptions result = new QueryObjectOptions(this, size, this.writeResults);
 		
 		System.arraycopy(
 				this.byteRanges(), from * 2,
