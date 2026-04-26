@@ -88,6 +88,8 @@ public class IndexQueryOptions implements IndexContainerOptions, IndexQueryReque
 
 	public final boolean queryWriteResults;
 
+	public final boolean queryWriteSummaries;
+
 	public IndexQueryOptions(String queryName, String queryAccess,
 		List<String> queryObjectStorageArgs, String queryIndexContainer,
 		String queryReadContainer, boolean queryReadPrintProgress,
@@ -101,7 +103,7 @@ public class IndexQueryOptions implements IndexContainerOptions, IndexQueryReque
 		int queryScanFunctionThreads, int queryStreamFunctionObjects,
 		int queryStreamFunctionByteRange, String queryStreamFunctionUrl,
 		String queryLogLevels, String queryLogGroup,
-		boolean queryWriteResults) {
+		boolean queryWriteResults, boolean queryWriteSummaries) {
 
 		this.queryName = queryName;
 		this.queryObjectStorageName = queryAccess;
@@ -141,13 +143,14 @@ public class IndexQueryOptions implements IndexContainerOptions, IndexQueryReque
 		this.queryLogGroup = queryLogGroup;
 
 		this.queryWriteResults = queryWriteResults;
+		this.queryWriteSummaries = queryWriteSummaries;
 	}
 
 	protected IndexQueryOptions() {
 		this(null, null, new ArrayList<>(), null, null, true, null, new LinkedList<>(),
 			new LinkedList<>(), new LinkedList<>(), null, 0, 0, 0, 0, null,
 			-1, -1, 0, null, 0, DEFAULT_MAX_FUNCTION_INSTANCES, 0, 0, 0, null, null, null,
-			false);
+			false, false);
 	}
 	
 	@Override

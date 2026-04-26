@@ -50,12 +50,25 @@ public class QueryObjectOptions implements QueryObjectRequest {
 
 	public final boolean writeResults;
 
+	public final boolean writeSummaries;
+
+	/**
+	 * Slice bounds for this dispatch (from coordinator's TimeSlice override).
+	 * Always populated regardless of {@link #from}/{@link #to} which may be
+	 * zero when timestamp filtering is unnecessary for an in-timeframe byte
+	 * range. Used by writers to key per-slice S3 output prefixes.
+	 */
+	public final long sliceFrom;
+
+	public final long sliceTo;
+
 	private transient int currByteRangeIndex;
 
 	public QueryObjectOptions(String queryName, String objectStorageName, List<String> objectStorageArgs,
 			String filter, String target, String targetObject, String container, String indexContainer,
 			long from, long to, long[] byteRanges, String ID, long elapseTime,
-			List<String> logLevels, String logGroup, boolean writeResults) {
+			List<String> logLevels, String logGroup, boolean writeResults, boolean writeSummaries,
+			long sliceFrom, long sliceTo) {
 
 		this.queryName = queryName;
 		this.objectStorageName = objectStorageName;
@@ -77,20 +90,26 @@ public class QueryObjectOptions implements QueryObjectRequest {
 		this.logGroup = logGroup;
 
 		this.writeResults = writeResults;
+		this.writeSummaries = writeSummaries;
+
+		this.sliceFrom = sliceFrom;
+		this.sliceTo = sliceTo;
 	}
 
-	public QueryObjectOptions(QueryObjectRequest other, int segmentSize, boolean writeResults) {
+	public QueryObjectOptions(QueryObjectRequest other, int segmentSize, boolean writeResults, boolean writeSummaries,
+			long sliceFrom, long sliceTo) {
 
 		this(other.name(), other.accessorAlias(), ArgsUtil.toList(other.args()),
 			other.filter(), other.target(), other.inputObject(),
 			other.inputContainer(), other.indexContainer(),
 			other.from(), other.to(), new long [segmentSize * 2],
 			other.ID(), other.elapseTime(), other.queryLogLevels(), other.queryLogGroup(),
-			writeResults);
+			writeResults, writeSummaries, sliceFrom, sliceTo);
 	}
 
 	public QueryObjectOptions() {
-		this(null, null, new ArrayList<>(), null, null, null, null, null, 0, 0, null, null, 0, null, null, false);
+		this(null, null, new ArrayList<>(), null, null, null, null, null, 0, 0, null, null, 0, null, null,
+			false, false, 0, 0);
 	}
 	
 	@Override
@@ -166,7 +185,8 @@ public class QueryObjectOptions implements QueryObjectRequest {
 
 		int size = to - from;
 
-		QueryObjectOptions result = new QueryObjectOptions(this, size, this.writeResults);
+		QueryObjectOptions result = new QueryObjectOptions(this, size, this.writeResults, this.writeSummaries,
+			this.sliceFrom, this.sliceTo);
 		
 		System.arraycopy(
 				this.byteRanges(), from * 2,

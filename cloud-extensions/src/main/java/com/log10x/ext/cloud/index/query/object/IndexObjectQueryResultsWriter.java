@@ -29,28 +29,28 @@ import org.apache.logging.log4j.ThreadContext;
 import com.log10x.ext.cloud.index.shared.BaseIndexWriter;
 
 /**
- * Writer that buffers matched query events to a local temp file as JSONL and
- * uploads the file to object storage on close so that out-of-band consumers
- * (e.g. the Log10x MCP server) can retrieve full query results via S3 polling.
+ * Writer that buffers matched query events (or aggregated summaries) to a
+ * local temp file as JSONL and uploads the file to object storage on close so
+ * that out-of-band consumers (e.g. the Log10x MCP server) can retrieve full
+ * query output via S3 polling.
+ *
+ * Configurable via the {@code indexObjectType} arg passed in the writer block:
+ *   - {@code queryResults} (default) — raw events, S3 prefix {@code qr/}
+ *   - {@code querySummaries}        — aggregated summaries, S3 prefix {@code qrs/}
+ *
+ * Both modes write to a slice-keyed prefix so a consumer can interleave
+ * partial results across slices without depending on coordinator completion:
+ *
+ *   {indexObjectPath(type, target)}/{queryId}/{sliceFrom}_{sliceTo}/{worker}.jsonl
  *
  * Runs alongside {@link IndexObjectQueryWriter}, which continues to write the
- * byte-count markers the coordinator uses as a completion backstop. This writer
- * only adds result payloads — it does not replace or alter the backstop path.
+ * byte-count markers the coordinator uses as a completion backstop. This
+ * writer only adds payloads — it does not replace or alter the backstop path.
  *
- * The writer enforces a per-worker event cap (configurable via
- * {@code queryObjectResultsMaxEvents}, default 2000). When the cap is reached,
- * subsequent events are dropped and a sibling {@code .truncated} marker object
- * is uploaded so the consumer can surface the truncation to the user.
- *
- * Results are written under a separate top-level prefix from the byte-count
- * markers so that {@link IndexQueryWriter#queryElapsed} — which parses every
- * last path segment under {indexObjectPath(query)}/{queryId}/ as a long — is
- * not disturbed by non-numeric result filenames:
- *
- *   {indexObjectPath(queryResults, target)}/{queryId}/{objectByteRangesKey}.jsonl
- *
- * Truncation marker (only written when the cap is hit):
- *   {indexObjectPath(queryResults, target)}/{queryId}/{objectByteRangesKey}.truncated
+ * Per-worker event cap is configurable via {@code queryObjectResultsMaxEvents}
+ * (default 2000). When the cap is reached, subsequent records are dropped and
+ * a sibling {@code .truncated} marker object is uploaded so the consumer can
+ * surface the truncation to the user.
  */
 public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 
@@ -74,6 +74,12 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 
 	private final BufferedWriter tempWriter;
 
+	private final IndexObjectType indexObjectType;
+
+	private final long sliceFrom;
+
+	private final long sliceTo;
+
 	private long eventCount;
 
 	private long truncatedCount;
@@ -93,13 +99,33 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 		return logLevels.contains(level.name());
 	}
 
+	/**
+	 * Resolve the {@code indexObjectType} arg from the writer block.
+	 * Accepts the enum {@code name()} (e.g. {@code "queryResults"},
+	 * {@code "querySummaries"}). Defaults to {@code queryResults} when absent
+	 * or unrecognized so existing deployments behave identically.
+	 */
+	private static IndexObjectType resolveIndexObjectType(Map<String, Object> args) {
+		Object raw = (args != null) ? args.get("indexObjectType") : null;
+		if (raw == null) {
+			return IndexObjectType.queryResults;
+		}
+		try {
+			return IndexObjectType.valueOf(raw.toString());
+		} catch (IllegalArgumentException e) {
+			return IndexObjectType.queryResults;
+		}
+	}
+
 	public IndexObjectQueryResultsWriter(Map<String, Object> args, EvaluatorBean evaluatorBean)
 		throws NoSuchAlgorithmException, IllegalArgumentException, IOException {
 
-		this(MapperUtil.jsonMapper.convertValue(args, IndexQueryObjectOptions.class), null, evaluatorBean);
+		this(MapperUtil.jsonMapper.convertValue(args, IndexQueryObjectOptions.class),
+			resolveIndexObjectType(args), null, evaluatorBean);
 	}
 
 	protected IndexObjectQueryResultsWriter(IndexQueryObjectOptions options,
+		IndexObjectType indexObjectType,
 		ObjectStorageIndexAccessor indexAccessor,
 		EvaluatorBean evaluatorBean) throws NoSuchAlgorithmException, IOException {
 
@@ -108,6 +134,10 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 		this.queryId = options.queryObjectID;
 		this.workerID = (String) evaluatorBean.env(PipelineLaunchOptions.UNIQUE_ID);
 		this.logLevels = options.queryObjectLogLevels;
+
+		this.indexObjectType = indexObjectType;
+		this.sliceFrom = options.queryObjectSliceFrom;
+		this.sliceTo = options.queryObjectSliceTo;
 
 		ThreadContext.put(MDC_QUERY_ID, this.queryId);
 
@@ -225,10 +255,16 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 			tempWriter.flush();
 			tempWriter.close();
 
-			String basePath = indexAccessor.indexObjectPath(IndexObjectType.queryResults, this.options.target());
+			String basePath = indexAccessor.indexObjectPath(this.indexObjectType, this.options.target());
+			// Slice segment groups outputs by the coordinator's TimeSlice so an MCP
+			// consumer can poll {queryId}/{sliceFrom}_{sliceTo}/ for streaming
+			// progress without waiting for whole-query completion.
+			String sliceSegment = this.sliceFrom + "_" + this.sliceTo;
 			String resultsPrefix = (new StringBuilder(basePath))
 				.append(indexAccessor.keyPathSeperator())
 				.append(((IndexQueryObjectOptions) this.options).queryObjectID)
+				.append(indexAccessor.keyPathSeperator())
+				.append(sliceSegment)
 				.toString();
 
 			long fileSize = Files.size(tempFile);
