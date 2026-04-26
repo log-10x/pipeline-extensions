@@ -47,6 +47,19 @@ public class IndexQueryObjectOptions implements QueryObjectRequest {
 
 	public final boolean queryObjectWriteResults;
 
+	public final boolean queryObjectWriteSummaries;
+
+	/**
+	 * Slice bounds for this dispatch — always populated from the coordinator's
+	 * TimeSlice override, regardless of {@link #queryObjectFrom}/{@link #queryObjectTo}
+	 * which may be zero when the byte range fully contains the timeframe and per-event
+	 * timestamp filtering is unnecessary. Used by writers to key per-slice S3 prefixes
+	 * (e.g. queryResults/{queryId}/{from}_{to}/{worker}.jsonl).
+	 */
+	public final long queryObjectSliceFrom;
+
+	public final long queryObjectSliceTo;
+
 	private transient int currByteRangeIndex;
 
 	public IndexQueryObjectOptions(String queryObjectQueryName, String queryObjectObjectStorageName,
@@ -54,7 +67,8 @@ public class IndexQueryObjectOptions implements QueryObjectRequest {
 			String queryObjectFilter, String queryObjectTarget, String queryObjectTargetObject,
 			boolean queryObjectPrintProgress, long queryObjectFrom, long queryObjectTo, long[] queryObjectByteRanges,
 			String queryObjectID, long queryObjectElapseTime, List<String> queryObjectLogLevels,
-			String queryObjectLogGroup, boolean queryObjectWriteResults) {
+			String queryObjectLogGroup, boolean queryObjectWriteResults,
+			boolean queryObjectWriteSummaries, long queryObjectSliceFrom, long queryObjectSliceTo) {
 
 		this.queryObjectQueryName = queryObjectQueryName;
 		this.queryObjectObjectStorageName = queryObjectObjectStorageName;
@@ -76,12 +90,15 @@ public class IndexQueryObjectOptions implements QueryObjectRequest {
 		this.queryObjectLogGroup = queryObjectLogGroup;
 
 		this.queryObjectWriteResults = queryObjectWriteResults;
+		this.queryObjectWriteSummaries = queryObjectWriteSummaries;
+		this.queryObjectSliceFrom = queryObjectSliceFrom;
+		this.queryObjectSliceTo = queryObjectSliceTo;
 	}
 
 	public IndexQueryObjectOptions() {
 
 		this(null, null, new ArrayList<>(), null, null, null,
-			null, null, true, 0, 0, null, null, 0, null, null, false);
+			null, null, true, 0, 0, null, null, 0, null, null, false, false, 0, 0);
 	}
 
 	@Override

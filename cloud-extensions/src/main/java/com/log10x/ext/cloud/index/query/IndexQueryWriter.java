@@ -1196,7 +1196,8 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				options.queryStreamFunctionUrl,
 				options.queryLogLevels,
 				options.queryLogGroup,
-				options.queryWriteResults);
+				options.queryWriteResults,
+				options.queryWriteSummaries);
 
 		do {
 
@@ -1574,7 +1575,13 @@ public class IndexQueryWriter extends BaseIndexWriter {
 				(filterTimestamps) ? queryOptions.queryTo : 0,
 				new long[byteRangeSize * 2], this.queryId, this.queryElapseTime,
 				queryOptions.queryLogLevels(), queryOptions.queryLogGroup,
-				queryOptions.queryWriteResults);
+				queryOptions.queryWriteResults,
+				queryOptions.queryWriteSummaries,
+				// Slice bounds always reflect the current dispatch's full time range
+				// (after TimeSlice override at scanFunction). Used by per-slice writers
+				// for S3 path keying; independent of filterTimestamps.
+				queryOptions.queryFrom,
+				queryOptions.queryTo);
 	}
 	
 	private List<QueryObjectOptions> createObjectRequests(Map<String, Set<TimestampByteRange>> targetObjects) {

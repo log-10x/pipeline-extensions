@@ -31,7 +31,8 @@ public interface ObjectStorageIndexAccessor extends PipelineEndpointAccessor, Ob
 		byteRange("b"),
 		reverseIndex("r"),
 		query("q"),
-		queryResults("qr");
+		queryResults("qr"),
+		querySummaries("qrs");
 		
 		public final String key;
 		
