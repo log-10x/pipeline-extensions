@@ -99,29 +99,11 @@ public class IndexObjectQueryResultsWriter extends BaseIndexWriter {
 		return logLevels.contains(level.name());
 	}
 
-	/**
-	 * Resolve the {@code indexObjectType} arg from the writer block.
-	 * Accepts the enum {@code name()} (e.g. {@code "queryResults"},
-	 * {@code "querySummaries"}). Defaults to {@code queryResults} when absent
-	 * or unrecognized so existing deployments behave identically.
-	 */
-	private static IndexObjectType resolveIndexObjectType(Map<String, Object> args) {
-		Object raw = (args != null) ? args.get("indexObjectType") : null;
-		if (raw == null) {
-			return IndexObjectType.queryResults;
-		}
-		try {
-			return IndexObjectType.valueOf(raw.toString());
-		} catch (IllegalArgumentException e) {
-			return IndexObjectType.queryResults;
-		}
-	}
-
 	public IndexObjectQueryResultsWriter(Map<String, Object> args, EvaluatorBean evaluatorBean)
 		throws NoSuchAlgorithmException, IllegalArgumentException, IOException {
 
 		this(MapperUtil.jsonMapper.convertValue(args, IndexQueryObjectOptions.class),
-			resolveIndexObjectType(args), null, evaluatorBean);
+			IndexObjectType.queryResults, null, evaluatorBean);
 	}
 
 	protected IndexObjectQueryResultsWriter(IndexQueryObjectOptions options,
