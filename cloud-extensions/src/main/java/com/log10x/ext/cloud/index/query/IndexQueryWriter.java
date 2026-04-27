@@ -241,6 +241,16 @@ public class IndexQueryWriter extends BaseIndexWriter {
 	private final AtomicLong aggStreamObjects = new AtomicLong();
 	private final AtomicLong aggStreamBlobs = new AtomicLong();
 
+	// Coordinator-local count of scan slices dispatched in remote-dispatch mode
+	// (submitToEndpoint). The agg* atomics above are scan-worker-side counters
+	// updated inside scanIndexRange — in remote dispatch the coordinator never
+	// sees those updates because the workers run in different processes (Lambda /
+	// separate pod consuming the SQS subquery-queue). Without this field, the
+	// _DONE.json reason classifier at close() time has no honest signal about
+	// whether the coordinator actually dispatched any work — it would always
+	// see aggSubmittedTasks==0 and falsely report "empty-range".
+	private long localDispatchedSlices;
+
 	private boolean shouldLog(QueryLogLevel level) {
 		IndexQueryOptions opts = (IndexQueryOptions) this.options;
 		List<String> levels = opts.queryLogLevels();
@@ -1017,18 +1027,42 @@ public class IndexQueryWriter extends BaseIndexWriter {
 
 			if (this.queryStartTime != 0) {
 				long elapsed = System.currentTimeMillis() - this.queryStartTime;
+
+				// Detect dispatch mode. In remote-dispatch the coordinator submits
+				// scan tasks to an SQS endpoint and exits — workers run in different
+				// processes, so the agg* atomics never see their counters. The only
+				// honest signal at close() time is `localDispatchedSlices` (how many
+				// scan tasks the coordinator dispatched). Downstream completion +
+				// match counts must be observed by the consumer (MCP) via byte-count
+				// markers under q/{queryId}/ — not from this _DONE.json marker.
+				IndexQueryOptions qOpt = (IndexQueryOptions) this.options;
+				long queryRange = qOpt.queryTo - qOpt.queryFrom;
+				boolean isRemoteDispatch = (this.timeslice != 0) && (this.timeslice < queryRange);
+
 				long scanned = aggScanned.get();
 				long matched = aggMatched.get();
 				long skippedSearch = aggSkippedSearch.get();
 				long skippedTemplate = aggSkippedTemplate.get();
 				long streamRequests = aggStreamRequests.get();
 				long streamBlobs = aggStreamBlobs.get();
-				long submittedTasks = aggSubmittedTasks.get();
+				long submittedTasks = isRemoteDispatch
+						? this.localDispatchedSlices
+						: aggSubmittedTasks.get();
 
-				// Classification reason — enum consumed by MCP streamer-diagnostics to
-				// distinguish 'we scanned and matched' vs the 3 distinct 0-result paths.
+				// Classification reason — consumed by MCP streamer-diagnostics. In
+				// remote dispatch we can only honestly classify "did the coordinator
+				// dispatch anything?" — the rest is deferred to consumer-side marker
+				// polling. In local dispatch the agg* atomics are authoritative.
 				String reason;
-				if (matched > 0 && streamRequests > 0) {
+				if (isRemoteDispatch) {
+					if (this.localDispatchedSlices > 0) {
+						reason = "dispatched";
+					} else {
+						// queryElapsed returned true on the first iteration before
+						// any send() — true empty-range from the coordinator's view.
+						reason = "empty-range";
+					}
+				} else if (matched > 0 && streamRequests > 0) {
 					reason = "success";
 				} else if (submittedTasks == 0) {
 					reason = "empty-range";       // index prefix had no blobs for this window
@@ -1056,9 +1090,8 @@ public class IndexQueryWriter extends BaseIndexWriter {
 							"reason", reason));
 
 				// Top-level coordinator only (recursive local scan sub-queries
-				// run with timeslice=0 and must not emit the marker).
-				IndexQueryOptions qOpt = (IndexQueryOptions) this.options;
-
+				// run with timeslice=0 and must not emit the marker). qOpt was
+				// already cast above for the dispatch-mode detection.
 				if (qOpt.queryScanFunctionParallelTimeslice > 0) {
 					writeDoneMarker(qOpt, elapsed, reason, scanned, matched,
 							skippedSearch, skippedTemplate, streamRequests,
@@ -1219,6 +1252,11 @@ public class IndexQueryWriter extends BaseIndexWriter {
 			index++;
 
 		} while (currFrom < options.queryTo);
+
+		// Persist for close()'s _DONE.json reason classifier — see field
+		// declaration's comment for why local atomics aren't authoritative
+		// here.
+		this.localDispatchedSlices = index;
 
 		if (logger.isDebugEnabled()) {
 			logger.debug("tasks submitted to remote endpoint: " + index);
