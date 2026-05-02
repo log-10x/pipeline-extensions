@@ -12,6 +12,7 @@ dependencies {
 	implementation "org.xerial.snappy:snappy-java:${snappyVersion}"
 	implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
 	implementation "com.log10x:prometheus-remote-write:${remoteWriteVersion}"
+	implementation "io.prometheus:prometheus-metrics-exporter-httpserver:${prometheusMetricsVersion}"
 }
 
 eclipse {
