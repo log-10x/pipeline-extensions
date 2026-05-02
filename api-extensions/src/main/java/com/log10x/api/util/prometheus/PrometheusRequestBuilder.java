@@ -54,7 +54,7 @@ public class PrometheusRequestBuilder {
 
 				boolean isCounter = (snapshot instanceof CounterSnapshot);
 				
-				String metricName = snapshot.getMetadata().getName();
+				String metricName = snapshot.getMetadata().getPrometheusName();
 				
 				if (isCounter) {
 					metricName += PrometheusClient.PROMETHEUS_COUNTER_SUFFIX;
