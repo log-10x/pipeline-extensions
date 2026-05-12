@@ -4,7 +4,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
@@ -17,7 +16,6 @@ import org.apache.logging.log4j.Logger;
 
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
-import com.google.protobuf.ByteString;
 
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
@@ -40,38 +38,22 @@ import io.opentelemetry.proto.resource.v1.Resource;
  * over gRPC and emits newline-delimited JSON records for the Log10x pipeline
  * to consume.
  *
- * Each incoming {@code ExportLogsServiceRequest} can carry many resources,
- * each carrying many scopes, each carrying many log records. Every log record
- * is flattened into a single JSON line containing:
+ * Each log record inside an incoming {@code ExportLogsServiceRequest} is
+ * emitted as a single JSON line containing:
  * <ul>
- *   <li>{@code body} — the log body, recursively decoded from {@link AnyValue}</li>
- *   <li>{@code severity_text}, {@code severity_number} — when set</li>
- *   <li>{@code timestamp} — epoch nanoseconds</li>
- *   <li>{@code trace_id}, {@code span_id} — hex encoded, when set</li>
- *   <li>The log record's own attributes, flat at the top level</li>
- *   <li>The owning scope's {@code scope.name}, {@code scope.version}, and
- *       {@code scope.<attr>} attributes</li>
- *   <li>The owning resource's attributes, flat at the top level</li>
- *   <li>{@code tag} — synthetic, set to either {@code service.name} or
- *       {@code k8s.pod.name} when present, otherwise the literal string
- *       {@code "otel"} — used by the Log10x source-grouping path</li>
+ *   <li>{@code body} — the log body, recursively decoded from {@link AnyValue}
+ *       in its OTLP shape (e.g. {@code {"stringValue":"…"}})</li>
+ *   <li>The log record's attributes, flat at the top level (keys unchanged)</li>
+ *   <li>The owning resource's attributes, flat at the top level (keys unchanged)</li>
+ *   <li>{@code tag} — synthetic envelope-level tag, set to {@code service.name}
+ *       if present, otherwise {@code k8s.pod.name}, otherwise the literal
+ *       {@code "otel"} — used by the Forward output as the wire tag and by
+ *       the engine's {@code sourcePattern} as the event source</li>
  * </ul>
  *
- * Configuration options (passed via Map in constructor):
- * <ul>
- *   <li>{@code port} — TCP port for the OTLP/gRPC server (default 4317)</li>
- * </ul>
- *
- * Example usage in YAML:
- * <pre>
- * input:
- *   - type: stream
- *     name: otlp
- *     path: com.log10x.ext.edge.input.otlp.OtlpLogsInputStream
- *     args:
- *       - port
- *       - 4317
- * </pre>
+ * Field-content interpretation (which key carries the log line, etc.) is
+ * the engine's responsibility — see the {@code extractor} block in
+ * {@code input/stream.yaml}.
  */
 public class OtlpLogsInputStream extends InputStream {
 
@@ -84,6 +66,15 @@ public class OtlpLogsInputStream extends InputStream {
     private final int port;
     private final JsonFactory jsonFactory;
     private final ConcurrentLinkedQueue<String> lineQueue = new ConcurrentLinkedQueue<>();
+
+    // Per-thread scratch buffer reused across renderRecord calls. gRPC drives
+    // export() from a small pool of Netty handler threads, so per-record
+    // allocation of the 512-byte StringWriter becomes hot when records flow.
+    // The ThreadLocal is rooted on its owning thread, so it dies with the
+    // thread — no global leak. StringBuffer synchronization inside the writer
+    // is uncontended (single thread per ThreadLocal slot) so JIT elides it.
+    private static final ThreadLocal<StringWriter> RENDER_BUF =
+        ThreadLocal.withInitial(() -> new StringWriter(512));
 
     private Server server;
     private byte[] pendingBytes;
@@ -212,48 +203,91 @@ public class OtlpLogsInputStream extends InputStream {
     // ── OTLP → JSON flattening ─────────────────────────────────────────────────
 
     private String renderRecord(Resource resource, InstrumentationScope scope, LogRecord lr) throws IOException {
-        StringWriter sw = new StringWriter(256);
+        StringWriter sw = RENDER_BUF.get();
+        sw.getBuffer().setLength(0);
 
         try (JsonGenerator gen = jsonFactory.createGenerator(sw)) {
             gen.writeStartObject();
 
-            // MINIMAL: just message + tag (Vector-shape) to verify flow.
-            String bodyText = "";
-            if (lr.hasBody() && lr.getBody().getValueCase() == AnyValue.ValueCase.STRING_VALUE) {
-                bodyText = lr.getBody().getStringValue();
+            // Body — for plain-text log lines (stringValue) the body is
+            // emitted as a top-level string field so the engine's outer-text
+            // accessor sees it as a flat capture (needed by `encode()` to
+            // preserve the surrounding envelope in optimize mode). For
+            // non-string bodies the value is emitted in its OTLP AnyValue
+            // shape so it stays losslessly addressable downstream.
+            if (lr.hasBody()) {
+                AnyValue body = lr.getBody();
+                if (body.getValueCase() == AnyValue.ValueCase.STRING_VALUE) {
+                    gen.writeStringField("body", body.getStringValue());
+                } else {
+                    gen.writeFieldName("body");
+                    writeAnyValue(gen, body);
+                }
             }
-            gen.writeStringField("message", bodyText);
 
-            String tag = pickTag(resource, lr);
-            gen.writeStringField("tag", tag);
+            // Log-record attributes (flat)
+            for (KeyValue kv : lr.getAttributesList()) {
+                writeKv(gen, kv);
+            }
+
+            // Resource attributes (flat)
+            for (KeyValue kv : resource.getAttributesList()) {
+                writeKv(gen, kv);
+            }
+
+            // Synthetic envelope-level tag — Forward output uses this as the
+            // wire tag, and the engine's `sourcePattern` extracts it as the
+            // event source.
+            gen.writeStringField("tag", pickTag(resource, lr));
+
+            // Synthetic markers carrying the OTLP shape that flat JSON loses:
+            // which top-level keys belong on `Resource` vs the log record, plus
+            // the original OTLP timestamps (the engine's logEvent time is reset
+            // on the way through the pipeline). The `_tenx_` prefix keeps them
+            // from colliding with user fields and lets the output appender
+            // strip them on the way out.
+            if (resource.getAttributesCount() > 0) {
+                gen.writeArrayFieldStart("_tenx_resource_keys");
+                for (KeyValue kv : resource.getAttributesList()) {
+                    gen.writeString(kv.getKey());
+                }
+                gen.writeEndArray();
+            }
+            gen.writeNumberField("_tenx_time", lr.getTimeUnixNano());
+            gen.writeNumberField("_tenx_observed_time", lr.getObservedTimeUnixNano());
 
             gen.writeEndObject();
         }
-
+        // Trailing newline appended after the generator closes — keeps a
+        // single allocation downstream, since read() can hand these bytes
+        // straight to the engine without an extra String + getBytes() round
+        // trip just to append \n.
+        sw.append('\n');
         return sw.toString();
     }
 
     private static String pickTag(Resource resource, LogRecord lr) {
-        // Prefer service.name from resource, then k8s.pod.name, then a literal.
+        // Single pass: prefer service.name, fall back to k8s.pod.name.
+        String podName = null;
         for (KeyValue kv : resource.getAttributesList()) {
-            if ("service.name".equals(kv.getKey()) && kv.getValue().getStringValue().length() > 0) {
-                return kv.getValue().getStringValue();
+            String key = kv.getKey();
+            if ("service.name".equals(key)) {
+                String v = kv.getValue().getStringValue();
+                if (!v.isEmpty()) {
+                    return v;
+                }
+            } else if (podName == null && "k8s.pod.name".equals(key)) {
+                String v = kv.getValue().getStringValue();
+                if (!v.isEmpty()) {
+                    podName = v;
+                }
             }
         }
-        for (KeyValue kv : resource.getAttributesList()) {
-            if ("k8s.pod.name".equals(kv.getKey()) && kv.getValue().getStringValue().length() > 0) {
-                return kv.getValue().getStringValue();
-            }
-        }
-        return "otel";
+        return podName != null ? podName : "otel";
     }
 
     private void writeKv(JsonGenerator gen, KeyValue kv) throws IOException {
-        // Replace dots with underscores in attribute keys. The engine's JSON
-        // extractor uses dotted paths for nested-field access, so a top-level
-        // key like `k8s.namespace.name` is interpreted as a path into a
-        // non-existent map and the value is dropped.
-        gen.writeFieldName(kv.getKey().replace('.', '_'));
+        gen.writeFieldName(kv.getKey());
         writeAnyValue(gen, kv.getValue());
     }
 
@@ -297,16 +331,6 @@ public class OtlpLogsInputStream extends InputStream {
         }
     }
 
-    private static String hex(ByteString bytes) {
-        StringBuilder sb = new StringBuilder(bytes.size() * 2);
-        for (int i = 0; i < bytes.size(); i++) {
-            int b = bytes.byteAt(i) & 0xFF;
-            sb.append(Character.forDigit((b >> 4) & 0xF, 16));
-            sb.append(Character.forDigit(b & 0xF, 16));
-        }
-        return sb.toString();
-    }
-
     // ── InputStream interface ──────────────────────────────────────────────────
 
     @Override
@@ -340,7 +364,9 @@ public class OtlpLogsInputStream extends InputStream {
             return -1;
         }
 
-        byte[] lineBytes = (line + "\n").getBytes(StandardCharsets.UTF_8);
+        // renderRecord already appended '\n' before returning, so a single
+        // UTF-8 encode is all we need here — no extra String concat.
+        byte[] lineBytes = line.getBytes(StandardCharsets.UTF_8);
         int copyLen = Math.min(len, lineBytes.length);
         System.arraycopy(lineBytes, 0, b, off, copyLen);
 
