@@ -2,6 +2,7 @@ package com.log10x.ext.edge.input.unix;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetSocketAddress;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
 import java.nio.ByteBuffer;
@@ -16,16 +17,20 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 /**
- * An input stream that reads line-delimited data from a Unix domain socket.
+ * An input stream that reads line-delimited data from a Unix domain socket
+ * or a TCP socket.
  *
  * Optionally parses RFC5424 syslog format and extracts only the MSG field,
  * which is useful for receiving logs from OpenTelemetry Collector's syslog exporter.
  *
  * Configuration options (passed via Map in constructor):
- * - path: Unix socket path (required)
+ * - path: Unix socket path (Unix mode — takes precedence when both are set)
+ * - port: TCP port to listen on (TCP mode — used when path is empty/unset)
  * - syslog: If true, parse RFC5424 and extract MSG field only (optional, default: false)
  *
- * Example usage in YAML:
+ * Either {@code path} or {@code port} must be provided.
+ *
+ * Example usage in YAML (Unix socket):
  * <pre>
  * input:
  *   - type: custom
@@ -34,18 +39,31 @@ import org.apache.logging.log4j.Logger;
  *       path: /tmp/tenx-input.sock
  *       syslog: true
  * </pre>
+ *
+ * Example usage in YAML (TCP, cross-platform — used by the Vector integration
+ * where Vector's {@code socket} sink sends newline-delimited JSON):
+ * <pre>
+ * input:
+ *   - type: custom
+ *     class: com.log10x.ext.edge.input.unix.UnixSocketInputStream
+ *     options:
+ *       port: 9000
+ *       syslog: false
+ * </pre>
  */
 public class UnixSocketInputStream extends InputStream {
 
     private static final Logger logger = LogManager.getLogger(UnixSocketInputStream.class);
 
     private static final String PATH = "path";
+    private static final String PORT = "port";
     private static final String SYSLOG = "syslog";
 
     private static final int BUFFER_SIZE = 8192;
     private static final byte NEWLINE = '\n';
 
     private final String socketPath;
+    private final int port;
     private final boolean parseSyslog;
 
     private ServerSocketChannel server;
@@ -58,16 +76,29 @@ public class UnixSocketInputStream extends InputStream {
     /**
      * Constructor invoked by the Log10x runtime.
      *
-     * @param args Map of arguments containing 'path' (required) and 'syslog' (optional)
+     * @param args Map of arguments — must contain either 'path' (Unix socket) or 'port' (TCP),
+     *             plus optional 'syslog' flag
      * @throws IOException if socket creation fails
      */
     public UnixSocketInputStream(Map<String, Object> args) throws IOException {
 
-        if (args == null || !args.containsKey(PATH)) {
-            throw new IllegalArgumentException("expected socket path in args, received: " + args);
+        if (args == null) {
+            throw new IllegalArgumentException("expected socket path or port in args, received: null");
         }
 
-        this.socketPath = String.valueOf(args.get(PATH));
+        boolean hasPath = args.containsKey(PATH) && args.get(PATH) != null
+                && !String.valueOf(args.get(PATH)).isEmpty();
+
+        boolean hasPort = args.containsKey(PORT) && args.get(PORT) != null
+                && !String.valueOf(args.get(PORT)).isEmpty();
+
+        if (!hasPath && !hasPort) {
+            throw new IllegalArgumentException("expected socket path or port in args, received: " + args);
+        }
+
+        // Unix socket path takes precedence over TCP port when specified
+        this.socketPath = hasPath ? String.valueOf(args.get(PATH)) : null;
+        this.port = hasPath ? -1 : Integer.parseInt(String.valueOf(args.get(PORT)));
         this.parseSyslog = Boolean.TRUE.equals(args.get(SYSLOG)) ||
                            "true".equalsIgnoreCase(String.valueOf(args.get(SYSLOG)));
 
@@ -77,13 +108,25 @@ public class UnixSocketInputStream extends InputStream {
         this.lineBufferPos = 0;
         this.closed = false;
 
-        logger.info("initializing Unix socket input stream at: {} (syslog parsing: {})",
-            socketPath, parseSyslog);
+        if (socketPath != null) {
+            logger.info("initializing Unix socket input stream at: {} (syslog parsing: {})",
+                socketPath, parseSyslog);
+        } else {
+            logger.info("initializing TCP socket input stream on port: {} (syslog parsing: {})",
+                port, parseSyslog);
+        }
 
         open();
     }
 
     private void open() throws IOException {
+        if (socketPath == null) {
+            server = ServerSocketChannel.open();
+            server.bind(new InetSocketAddress(port));
+            logger.info("TCP socket server listening on port: {}", port);
+            return;
+        }
+
         Path path = Path.of(socketPath);
 
         // Clean up stale socket file
@@ -101,11 +144,15 @@ public class UnixSocketInputStream extends InputStream {
         logger.info("Unix socket server listening on: {}", socketPath);
     }
 
+    private String describeEndpoint() {
+        return socketPath != null ? socketPath : "tcp://0.0.0.0:" + port;
+    }
+
     private void acceptClient() throws IOException {
         if (client == null || !client.isOpen()) {
-            logger.debug("waiting for client connection on: {}", socketPath);
+            logger.debug("waiting for client connection on: {}", describeEndpoint());
             client = server.accept();
-            logger.info("client connected to Unix socket: {}", socketPath);
+            logger.info("client connected to socket input: {}", describeEndpoint());
         }
     }
 
@@ -311,7 +358,7 @@ public class UnixSocketInputStream extends InputStream {
         }
 
         closed = true;
-        logger.info("closing Unix socket input stream: {}", socketPath);
+        logger.info("closing socket input stream: {}", describeEndpoint());
 
         try {
             if (client != null) {
@@ -329,15 +376,19 @@ public class UnixSocketInputStream extends InputStream {
             logger.warn("error closing server channel", e);
         }
 
-        try {
-            Files.deleteIfExists(Path.of(socketPath));
-        } catch (IOException e) {
-            logger.warn("error deleting socket file", e);
+        if (socketPath != null) {
+            try {
+                Files.deleteIfExists(Path.of(socketPath));
+            } catch (IOException e) {
+                logger.warn("error deleting socket file", e);
+            }
         }
     }
 
     @Override
     public String toString() {
-        return "UnixSocketInputStream[path=" + socketPath + ", syslog=" + parseSyslog + "]";
+        return socketPath != null
+            ? "UnixSocketInputStream[path=" + socketPath + ", syslog=" + parseSyslog + "]"
+            : "UnixSocketInputStream[port=" + port + ", syslog=" + parseSyslog + "]";
     }
 }

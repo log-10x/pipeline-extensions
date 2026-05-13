@@ -275,8 +275,12 @@ public class ForwardProtocolInputStream extends InputStream {
         if (nextType == ValueType.ARRAY) {
             // Forward mode: [tag, [[time, record], [time, record], ...]]
             decodeForwardEntries(tag);
-        } else if (nextType == ValueType.BINARY) {
-            // PackedForward mode: [tag, packed_entries_bin, options?]
+        } else if (nextType == ValueType.BINARY || nextType == ValueType.STRING) {
+            // PackedForward mode: [tag, packed_entries (bin or str), options?]
+            // msgpack-ruby (used by Fluentd's out_forward) encodes the packed
+            // entries blob as STR for backward compatibility — pre-2013 msgpack
+            // had no separate BIN type. Modern encoders (fluent-bit, log4j2
+            // forward appender) use BIN. Both are valid on the wire.
             decodePackedForward(tag);
         } else if (nextType == ValueType.INTEGER || nextType == ValueType.EXTENSION) {
             // Message mode: [tag, time, record, options?]
@@ -323,7 +327,9 @@ public class ForwardProtocolInputStream extends InputStream {
      * msgpack [time, record] pairs.
      */
     private void decodePackedForward(String tag) throws IOException {
-        int binaryLength = unpacker.unpackBinaryHeader();
+        int binaryLength = unpacker.getNextFormat().getValueType() == ValueType.STRING
+                ? unpacker.unpackRawStringHeader()
+                : unpacker.unpackBinaryHeader();
         byte[] packed = unpacker.readPayload(binaryLength);
 
         try (MessageUnpacker entryUnpacker = MessagePack.newDefaultUnpacker(packed)) {
