@@ -1,9 +1,9 @@
 package com.log10x.ext.edge.input.forward;
 
+import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.StringWriter;
 import java.net.InetSocketAddress;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
@@ -33,6 +33,7 @@ import org.msgpack.value.MapValue;
 import org.msgpack.value.Value;
 import org.msgpack.value.ValueType;
 
+import com.fasterxml.jackson.core.JsonEncoding;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 
@@ -83,8 +84,14 @@ public class ForwardProtocolInputStream extends InputStream {
     private SocketChannel client;
     private MessageUnpacker unpacker;
 
-    /** Queue of decoded JSON lines ready to be returned by {@link #readLine()}. */
-    private final Queue<String> lineQueue = new ArrayDeque<>();
+    /**
+     * Queue of decoded JSON lines (UTF-8, already including the trailing
+     * '\n' delimiter). Stored as bytes rather than Strings so the entire
+     * decode → enqueue → read() path stays byte-oriented and we don't pay
+     * for msgpack-bytes → char[] → String → bytes round-trips on every
+     * event (fluentd shipping ~thousands of small records per second).
+     */
+    private final Queue<byte[]> lineQueue = new ArrayDeque<>();
 
     /** Overflow bytes from a JSON line that didn't fit in the previous {@code read()} call. */
     private byte[] pendingBytes;
@@ -199,16 +206,17 @@ public class ForwardProtocolInputStream extends InputStream {
     }
 
     /**
-     * Reads the next decoded JSON line from the forward protocol stream.
-     * Blocks until a line is available or the stream is closed.
+     * Reads the next decoded JSON line (UTF-8, '\n'-terminated) from the
+     * Forward-protocol stream. Blocks until a line is available or the
+     * stream is closed.
      */
-    public String readLine() throws IOException {
+    private byte[] nextLine() throws IOException {
         if (closed) {
             return null;
         }
 
         while (true) {
-            String queued = lineQueue.poll();
+            byte[] queued = lineQueue.poll();
             if (queued != null) {
                 recordsConsumed.incrementAndGet();
                 logStatsIfDue();
@@ -348,7 +356,12 @@ public class ForwardProtocolInputStream extends InputStream {
     // ── Record to JSON conversion ──────────────────────────────────────────────
 
     /**
-     * Converts a msgpack record value to JSON, injects the tag, and queues it.
+     * Converts a msgpack record value to JSON, injects the tag, appends a
+     * trailing '\n' delimiter, and queues the resulting UTF-8 bytes for
+     * downstream consumption by {@link #read(byte[], int, int)}. Using a
+     * byte-oriented {@code UTF8JsonGenerator} (via the OutputStream-typed
+     * factory method) lets {@link #writeValue} write msgpack BIN payloads
+     * to the JSON output without a String round-trip.
      */
     private void queueRecord(String tag, Value record) throws IOException {
         if (!record.isMapValue()) {
@@ -356,16 +369,17 @@ public class ForwardProtocolInputStream extends InputStream {
             return;
         }
 
-        StringWriter sw = new StringWriter(512);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(512);
 
-        try (JsonGenerator gen = jsonFactory.createGenerator(sw)) {
+        try (JsonGenerator gen = jsonFactory.createGenerator(baos, JsonEncoding.UTF8)) {
             gen.writeStartObject();
             gen.writeStringField("tag", tag);
             writeMapEntries(gen, record.asMapValue());
             gen.writeEndObject();
         }
 
-        lineQueue.add(sw.toString());
+        baos.write('\n');
+        lineQueue.add(baos.toByteArray());
         recordsDecoded.incrementAndGet();
     }
 
@@ -376,9 +390,17 @@ public class ForwardProtocolInputStream extends InputStream {
     private void writeMapEntries(JsonGenerator gen, MapValue map) throws IOException {
         for (Map.Entry<Value, Value> entry : map.entrySet()) {
             Value keyVal = entry.getKey();
-            String key = keyVal.isStringValue()
-                ? keyVal.asStringValue().asString()
-                : keyVal.toString();
+            String key;
+            if (keyVal.isStringValue()) {
+                key = keyVal.asStringValue().asString();
+            } else if (keyVal.isBinaryValue()) {
+                // BIN-typed keys arrive as text content from forwarders
+                // whose msgpack libraries choose BIN encoding (see the
+                // BINARY case in writeValue below for the rationale).
+                key = new String(keyVal.asBinaryValue().asByteArray(), StandardCharsets.UTF_8);
+            } else {
+                key = keyVal.toString();
+            }
             gen.writeFieldName(key);
             writeValue(gen, entry.getValue());
         }
@@ -414,9 +436,28 @@ public class ForwardProtocolInputStream extends InputStream {
                 gen.writeString(value.asStringValue().asString());
                 break;
 
-            case BINARY:
-                gen.writeBinary(value.asBinaryValue().asByteArray());
+            case BINARY: {
+                // Treat BIN as STRING (UTF-8). Forwarders routinely encode
+                // string-valued record fields (log line content, the
+                // kubernetes.* sub-fields, the `stream` field, etc.) as
+                // msgpack BIN depending on how their parser plugin handles
+                // captures and encodings — fluentd's tail+regexp parser
+                // emits regex group captures as BIN by default, for
+                // example. The downstream JSON extractor and symbol
+                // matcher need text values, not base64 blobs; writing the
+                // bytes as a string here keeps the engine robust to
+                // whatever STR/BIN choice the upstream forwarder makes.
+                // Companion to the BIN-accepting PackedForward decoder
+                // above (which addresses the reverse case — msgpack-ruby
+                // shipping the packed-entries blob as STR for back-compat).
+                //
+                // Use writeUTF8String so the bytes go straight into the
+                // JSON output without a String wrapper allocation +
+                // decode/re-encode round trip.
+                byte[] bytes = value.asBinaryValue().asByteArray();
+                gen.writeUTF8String(bytes, 0, bytes.length);
                 break;
+            }
 
             case ARRAY:
                 gen.writeStartArray();
@@ -488,12 +529,13 @@ public class ForwardProtocolInputStream extends InputStream {
             return copyLen;
         }
 
-        String line = readLine();
-        if (line == null) {
+        // Bytes already include the trailing '\n'; queued as UTF-8 by
+        // queueRecord, so no String → bytes conversion here.
+        byte[] lineBytes = nextLine();
+        if (lineBytes == null) {
             return -1;
         }
 
-        byte[] lineBytes = (line + "\n").getBytes(StandardCharsets.UTF_8);
         int copyLen = Math.min(len, lineBytes.length);
         System.arraycopy(lineBytes, 0, b, off, copyLen);
 

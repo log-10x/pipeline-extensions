@@ -25,7 +25,6 @@ import io.opentelemetry.proto.collector.logs.v1.ExportLogsServiceResponse;
 import io.opentelemetry.proto.collector.logs.v1.LogsServiceGrpc;
 import io.opentelemetry.proto.common.v1.AnyValue;
 import io.opentelemetry.proto.common.v1.ArrayValue;
-import io.opentelemetry.proto.common.v1.InstrumentationScope;
 import io.opentelemetry.proto.common.v1.KeyValue;
 import io.opentelemetry.proto.common.v1.KeyValueList;
 import io.opentelemetry.proto.logs.v1.LogRecord;
@@ -179,9 +178,8 @@ public class OtlpLogsInputStream extends InputStream {
                 for (ResourceLogs rl : request.getResourceLogsList()) {
                     Resource resource = rl.getResource();
                     for (ScopeLogs sl : rl.getScopeLogsList()) {
-                        InstrumentationScope scope = sl.getScope();
                         for (LogRecord lr : sl.getLogRecordsList()) {
-                            String line = renderRecord(resource, scope, lr);
+                            String line = renderRecord(resource, lr);
                             lineQueue.add(line);
                             decoded++;
                         }
@@ -202,7 +200,7 @@ public class OtlpLogsInputStream extends InputStream {
 
     // ── OTLP → JSON flattening ─────────────────────────────────────────────────
 
-    private String renderRecord(Resource resource, InstrumentationScope scope, LogRecord lr) throws IOException {
+    private String renderRecord(Resource resource, LogRecord lr) throws IOException {
         StringWriter sw = RENDER_BUF.get();
         sw.getBuffer().setLength(0);
 
@@ -238,7 +236,7 @@ public class OtlpLogsInputStream extends InputStream {
             // Synthetic envelope-level tag — Forward output uses this as the
             // wire tag, and the engine's `sourcePattern` extracts it as the
             // event source.
-            gen.writeStringField("tag", pickTag(resource, lr));
+            gen.writeStringField("tag", pickTag(resource));
 
             // Synthetic markers carrying the OTLP shape that flat JSON loses:
             // which top-level keys belong on `Resource` vs the log record, plus
@@ -266,7 +264,7 @@ public class OtlpLogsInputStream extends InputStream {
         return sw.toString();
     }
 
-    private static String pickTag(Resource resource, LogRecord lr) {
+    private static String pickTag(Resource resource) {
         // Single pass: prefer service.name, fall back to k8s.pod.name.
         String podName = null;
         for (KeyValue kv : resource.getAttributesList()) {

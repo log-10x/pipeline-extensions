@@ -5,7 +5,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -208,8 +207,7 @@ public class OtlpLogsOutputAppender extends AbstractAppender {
                 resourceAttrs = new ArrayList<>(resourceKeySet.size());
             }
 
-            for (Iterator<Map.Entry<String, JsonNode>> it = tree.fields(); it.hasNext(); ) {
-                Map.Entry<String, JsonNode> e = it.next();
+            for (Map.Entry<String, JsonNode> e : tree.properties()) {
                 String key = e.getKey();
                 JsonNode val = e.getValue();
 
@@ -352,11 +350,12 @@ public class OtlpLogsOutputAppender extends AbstractAppender {
                 JsonNode kv = val.get("kvlistValue");
                 KeyValueList.Builder kb = KeyValueList.newBuilder();
                 if (kv.isObject()) {
-                    kv.fields().forEachRemaining(e -> kb.addValues(
-                        KeyValue.newBuilder()
+                    for (Map.Entry<String, JsonNode> e : kv.properties()) {
+                        kb.addValues(KeyValue.newBuilder()
                             .setKey(e.getKey())
                             .setValue(jsonToAnyValue(e.getValue()))
-                            .build()));
+                            .build());
+                    }
                 }
                 return AnyValue.newBuilder().setKvlistValue(kb).build();
             }
@@ -404,11 +403,12 @@ public class OtlpLogsOutputAppender extends AbstractAppender {
         }
         if (val.isObject()) {
             KeyValueList.Builder kb = KeyValueList.newBuilder();
-            val.fields().forEachRemaining(e -> kb.addValues(
-                KeyValue.newBuilder()
+            for (Map.Entry<String, JsonNode> e : val.properties()) {
+                kb.addValues(KeyValue.newBuilder()
                     .setKey(e.getKey())
                     .setValue(jsonToAnyValue(e.getValue()))
-                    .build()));
+                    .build());
+            }
             return AnyValue.newBuilder().setKvlistValue(kb).build();
         }
         return AnyValue.newBuilder().setStringValue(val.asText()).build();
